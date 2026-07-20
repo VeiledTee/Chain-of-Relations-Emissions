@@ -428,15 +428,18 @@ def main() -> None:
 	else:
 		logging.info(f"param file exists, skip create: {param_json_file}")
 
-	done_size = 0 if args.question_id else count_done(output_jsonl_file)
-	logging.info(f"already done: {done_size}")
+	done_ids = set()
+	if not args.question_id and os.path.exists(output_jsonl_file):
+		with open(output_jsonl_file) as _f:
+			done_ids = {json.loads(_l).get("id") for _l in _f if _l.strip()}
+	logging.info(f"already done: {len(done_ids)} (id-based)")
 	if model_dirname != str(model_name):
 		logging.info(f"model_name path normalized: '{model_name}' -> '{model_dirname}'")
 
 	counter = 0
 	for data in tqdm(datas):
 		counter += 1
-		if counter <= done_size:
+		if data.get(indicator["question_id"]) in done_ids:
 			continue
 		if args.run_size > 0 and counter > args.run_size:
 			break
