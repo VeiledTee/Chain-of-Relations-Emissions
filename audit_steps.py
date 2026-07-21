@@ -25,7 +25,11 @@ for f in files:
         if st == "timeout":
             counts["timeout"] += 1; bad.append((f, "timeout"))
         elif st and st not in ("ok", "success"):
-            counts[f"status:{st}"] += 1; bad.append((f, st))
+            q = s.get("sparql", "")
+            if "ns:/" in q or "ns:http" in q:
+                counts["method_error"] += 1
+            else:
+                counts["infra_error"] += 1; bad.append((f, st))
         if s.get("result_count") == 1000:
             counts["at_limit_1000"] += 1
 print(f"files: {len(files)}")
