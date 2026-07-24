@@ -49,6 +49,7 @@ def main():
 
 	# 2. optional CodeCarbon (machine mode; needs RAPL for CPU/RAM, NVML for GPU)
 	tracker = None
+	os.makedirs(os.path.join(outdir, "codecarbon"), exist_ok=True)
 	try:
 		from codecarbon import OfflineEmissionsTracker
 		tracker = OfflineEmissionsTracker(
