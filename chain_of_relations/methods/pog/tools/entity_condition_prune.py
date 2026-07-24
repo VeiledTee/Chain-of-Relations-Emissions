@@ -304,10 +304,10 @@ def _semantic_topn(question: str, entities: List[Entity], topn: int) -> List[Ent
 	model = _get_semantic_model()
 	entity_names = [str(entity.name or entity.id) for entity in entities]
 	from chain_of_relations import energy_events
-	_t0 = energy_events.now()
+	_t0 = energy_events.mark()
 	query_emb = model.encode(question)
 	doc_emb = model.encode(entity_names)
-	energy_events.record("tool", "embedding:prune", _t0, energy_events.now(),
+	energy_events.record("tool", "embedding:prune", _t0, energy_events.mark(),
 		n_entities=len(entity_names))
 	scores = util.dot_score(query_emb, doc_emb)[0].cpu().tolist()
 	scored_entities = sorted(zip(entities, scores), key=lambda item: float(item[1]), reverse=True)

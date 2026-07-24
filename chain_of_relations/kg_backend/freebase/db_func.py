@@ -124,7 +124,7 @@ def execurte_sparql(sparql_txt):
 
 
 def execurte_sparql_with_meta(sparql_txt):
-	_t0 = energy_events.now()
+	_t0 = energy_events.mark()
 	last_error = ""
 	timed_out = False
 	for i in range(3):
@@ -134,7 +134,7 @@ def execurte_sparql_with_meta(sparql_txt):
 			sparql.setReturnFormat(JSON)
 			sparql.setTimeout(SPARQL_TIMEOUT)
 			results = sparql.query().convert()
-			energy_events.record_sparql(sparql_txt, _t0, energy_events.now(),
+			energy_events.record_sparql(sparql_txt, _t0, energy_events.mark(),
 				attempts=i + 1, rows=len(results["results"]["bindings"]))
 			return {
 				"rows": results["results"]["bindings"],
@@ -156,7 +156,7 @@ def execurte_sparql_with_meta(sparql_txt):
 	logging.error(
 		f"SPARQL query failed after 3 attempts on endpoint={SPARQLPATH}:\n{sparql_txt}"
 	)
-	energy_events.record_sparql(sparql_txt, _t0, energy_events.now(),
+	energy_events.record_sparql(sparql_txt, _t0, energy_events.mark(),
 		attempts=3, failed=True, timed_out=timed_out)
 	return {
 		"rows": [],
@@ -213,7 +213,7 @@ def id2entity_name_or_type(entity_id):
 		return _ID2NAME_CACHE[entity_id]
 
 	sparql_str = _render_id2name_query(entity_id)
-	_t0 = energy_events.now()
+	_t0 = energy_events.mark()
 	for i in range(3):
 		try:
 			sparql = SPARQLWrapper(SPARQLPATH)
@@ -221,7 +221,7 @@ def id2entity_name_or_type(entity_id):
 			sparql.setReturnFormat(JSON)
 			sparql.setTimeout(SPARQL_TIMEOUT)
 			results = sparql.query().convert()
-			energy_events.record_sparql(sparql_str, _t0, energy_events.now(), attempts=i + 1)
+			energy_events.record_sparql(sparql_str, _t0, energy_events.mark(), attempts=i + 1)
 			bindings = results.get("results", {}).get("bindings", [])
 			if len(bindings) == 0:
 				_ID2NAME_CACHE[entity_id] = "UnName_Entity"

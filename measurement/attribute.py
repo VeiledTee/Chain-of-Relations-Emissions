@@ -111,9 +111,18 @@ def main():
 	events = [json.loads(l) for l in open(args.events) if l.strip()]
 
 	rows = []
+	gpu_src = {"counter": 0, "integrated": 0}
 	for e in events:
 		t0, t1 = e["t_start"], e["t_end"]
-		gpu_j = sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
+		# GPU: prefer the in-band energy-counter delta (accurate for short
+		# events); fall back to power-curve integration when unavailable.
+		measured = e.get("gpu_energy_j")
+		if measured is not None:
+			gpu_j = measured
+			gpu_src["counter"] += 1
+		else:
+			gpu_j = sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
+			gpu_src["integrated"] += 1
 		cpu_j = sum(rapl_delta(ts, v, t0, t1) for name, v in rapls.items()
 		            if "package" in name or "core" in name)
 		dram_j = sum(rapl_delta(ts, v, t0, t1) for name, v in rapls.items()
@@ -125,6 +134,8 @@ def main():
 			"duration_s": e["duration_s"],
 			"gpu_j": gpu_j, "cpu_j": cpu_j, "dram_j": dram_j,
 		})
+	print(f"GPU energy source: {gpu_src['counter']} from counter, "
+	      f"{gpu_src['integrated']} integrated from power curve")
 
 	# aggregations
 	def agg(keyfn):

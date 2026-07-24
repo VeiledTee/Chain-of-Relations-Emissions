@@ -31,6 +31,63 @@ _fh = None
 
 _current_question = contextvars.ContextVar("energy_current_question", default="")
 
+# --- NVML cumulative energy counter (observer-only, optional) --------------
+# Reads nvmlDeviceGetTotalEnergyConsumption at each event boundary. Unlike the
+# 10 Hz power sampler, this captures a monotonic hardware energy counter at the
+# exact instants an event starts and ends, so even sub-millisecond events get a
+# precise Joule figure (counter delta). No power capping / no intervention:
+# this is a read-only counter, the same one Zeus's ZeusMonitor uses.
+# Falls back to None where unsupported (pre-Volta GPUs, some WSL2 configs);
+# attribute.py then reverts to power-curve integration for that event.
+_pynvml = None
+_nvml_handles = []
+_nvml_ok = False
+_nvml_tried = False
+
+
+def _init_nvml() -> None:
+	global _pynvml, _nvml_handles, _nvml_ok, _nvml_tried
+	if _nvml_tried or not _EVENTS_FILE:
+		return
+	_nvml_tried = True
+	try:
+		import pynvml
+		pynvml.nvmlInit()
+		n = pynvml.nvmlDeviceGetCount()
+		_pynvml = pynvml
+		_nvml_handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(n)]
+		_nvml_ok = True
+	except Exception:
+		_nvml_ok = False
+
+
+def gpu_energy_mj():
+	"""Cumulative device energy (millijoules), summed across GPUs, or None."""
+	_init_nvml()
+	if not _nvml_ok:
+		return None
+	try:
+		return sum(_pynvml.nvmlDeviceGetTotalEnergyConsumption(h)
+		           for h in _nvml_handles)
+	except Exception:
+		return None
+
+
+def mark():
+	"""Capture (wall_time, cumulative_gpu_energy_mj) at this instant.
+
+	Pass the returned marks as the start/end args to record()/record_sparql();
+	they compute the GPU energy delta directly from the counter.
+	"""
+	return (time.time(), gpu_energy_mj())
+
+
+def _split(m):
+	"""Accept either a float wall-time (legacy) or a (t, energy_mj) mark."""
+	if isinstance(m, tuple):
+		return m[0], m[1]
+	return m, None
+
 
 def enabled() -> bool:
 	return bool(_EVENTS_FILE)
@@ -52,19 +109,31 @@ def _classify_sparql(sparql_txt: str) -> str:
 	return "kg:sparql"
 
 
-def record(category: str, label: str, t_start: float, t_end: float, **meta) -> None:
-	"""Append one event. Never raises: measurement must not break the run."""
+def record(category: str, label: str, start, end, **meta) -> None:
+	"""Append one event. Never raises: measurement must not break the run.
+
+	start/end may be floats (wall time) or marks from mark(). When both marks
+	carry a GPU energy reading, the event stores a measured gpu_energy_j
+	(counter delta); otherwise gpu_energy_j is null and attribute.py integrates
+	the power curve for that event instead.
+	"""
 	if not _EVENTS_FILE:
 		return
 	global _fh
 	try:
+		t0, e0 = _split(start)
+		t1, e1 = _split(end)
+		gpu_energy_j = None
+		if e0 is not None and e1 is not None and e1 >= e0:
+			gpu_energy_j = (e1 - e0) / 1000.0  # mJ -> J
 		event = {
 			"question_id": _current_question.get(),
 			"category": category,
 			"label": label,
-			"t_start": t_start,
-			"t_end": t_end,
-			"duration_s": t_end - t_start,
+			"t_start": t0,
+			"t_end": t1,
+			"duration_s": t1 - t0,
+			"gpu_energy_j": gpu_energy_j,
 		}
 		if meta:
 			event["meta"] = meta
@@ -76,8 +145,8 @@ def record(category: str, label: str, t_start: float, t_end: float, **meta) -> N
 		pass
 
 
-def record_sparql(sparql_txt: str, t_start: float, t_end: float, **meta) -> None:
-	record("tool", _classify_sparql(sparql_txt), t_start, t_end, **meta)
+def record_sparql(sparql_txt: str, start, end, **meta) -> None:
+	record("tool", _classify_sparql(sparql_txt), start, end, **meta)
 
 
 def now() -> float:
