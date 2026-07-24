@@ -11,6 +11,8 @@
 
 import os
 import time
+
+from chain_of_relations import energy_events
 import logging
 from openai import OpenAI
 
@@ -59,6 +61,7 @@ class LLMAPI(object):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
 
+        _t0 = energy_events.now()
         last_error = None
         request_kwargs = {
             "model": self.model_name,
@@ -98,6 +101,12 @@ class LLMAPI(object):
                     }
 
                 if result:
+                    energy_events.record(
+                        "inference", "llm:generate", _t0, energy_events.now(),
+                        attempts=attempt,
+                        input_tokens=usage.get("input_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                    )
                     return result, usage
 
                 last_error = RuntimeError("empty_model_response")
@@ -115,4 +124,8 @@ class LLMAPI(object):
 
         logging.error(f"Failed to get response after {self.max_retries} retries")
         usage["error"] = str(last_error) if last_error else "unknown_error"
+        energy_events.record(
+            "inference", "llm:generate", _t0, energy_events.now(),
+            attempts=self.max_retries, failed=True,
+        )
         return None, usage

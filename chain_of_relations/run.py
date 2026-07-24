@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Tuple
 
 from tqdm import tqdm
 
+from chain_of_relations import energy_events
+
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
@@ -450,6 +452,7 @@ def main() -> None:
 			continue
 
 		question_id = data[indicator["question_id"]]
+		energy_events.set_question(question_id)
 		question = data[indicator["question"]]
 		gold_answer = data.get(indicator["gold_answer"], [])
 		sparql = data.get("sparql") or data.get("SPARQL") or ""
