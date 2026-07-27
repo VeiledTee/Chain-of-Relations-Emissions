@@ -1,0 +1,24 @@
+# Analysis of measurement/runs/smoke_cor_webqsp
+events=7307  questions=100  retries=0  gpu_counter=7307  gpu_missing=0
+
+## inference vs tool
+category    events    ev%        gpu_J   gpu%    dur_s
+inference      587   8.0%     248471.6  98.4%    794.7
+tool          6720  92.0%       4030.6   1.6%     40.9
+
+## per-label
+label                   events        gpu_J    J/call    dur_s
+llm:generate               587     248471.6   423.291    794.7
+kg:relation_search         488       1574.7     3.227      9.7
+kg:id2name                5862       1554.4     0.265     26.1
+kg:entity_search           370        901.5     2.437      5.2
+
+## tokens
+input=1,043,228  output=42,090  input%=96.1%  (prefill-dominated if >>50%)
+
+## per-question distributions (min / median / mean / max / max:min ratio)
+gpu_J           718.8   1438.2   2525.0  17332.7  spread   24.1x
+llm_calls         2.0      4.0      5.9     41.0  spread   20.5x
+tool_calls        2.0      9.0     67.2   1179.0  spread  589.5x
+
+Interpretation cue: a large tool_calls max:min ratio is the graph-fanout cost-variance story; input%>>50 is prefill dominance; gpu% concentrated in inference with events% in tool is the energy-vs-frequency inversion.
