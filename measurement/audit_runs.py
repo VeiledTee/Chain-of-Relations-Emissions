@@ -41,10 +41,21 @@ def load_events(path):
 
 
 def load_power(path):
-	rows = list(csv.DictReader(open(path)))
-	t = [float(r["t"]) for r in rows]
-	pcols = [c for c in rows[0] if c != "t"]
-	p = [sum(float(r[c]) for c in pcols) for r in rows]
+	t, p, bad = [], [], 0
+	rdr = csv.DictReader(l.replace("\x00", "") for l in
+	                     open(path, errors="replace"))
+	for r in rdr:
+		try:
+			ti = float(r["t"])
+			pi = sum(float(r[c]) for c in r if c != "t")
+		except (TypeError, ValueError):
+			bad += 1
+			continue
+		t.append(ti)
+		p.append(pi)
+	if bad:
+		print(f"    !! {bad} unparseable power row(s) skipped in "
+		      f"{os.path.basename(path)}")
 	return t, p
 
 
