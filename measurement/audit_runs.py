@@ -25,7 +25,17 @@ GAP_S = 300.0             # gap between events that suggests a split run
 
 
 def load_events(path):
-	ev = [json.loads(l) for l in open(path) if l.strip()]
+	ev, bad = [], 0
+	for l in open(path, "rb"):
+		s = l.strip().strip(b"\x00")
+		if not s:
+			continue
+		try:
+			ev.append(json.loads(s))
+		except Exception:
+			bad += 1
+	if bad:
+		print(f"    !! {bad} unparseable line(s) skipped in {os.path.basename(path)}")
 	ev.sort(key=lambda e: e["t_start"])
 	return ev
 
