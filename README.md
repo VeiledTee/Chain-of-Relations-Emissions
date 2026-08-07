@@ -180,6 +180,7 @@ export OPENAI_API_KEY="dummy"                    # non-empty; value ignored
 export MODEL_NAME="Qwen/Qwen2.5-7B-Instruct"     # must match served name EXACTLY
 export FREEBASE_SPARQL_ENDPOINT="http://127.0.0.1:8890/sparql"
 export OPENAI_TIMEOUT=300                        # 30s default causes double-billed retries
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 ```
 
 ```bash
