@@ -99,7 +99,7 @@ def audit(run_dir):
 	# is fuzzy; flag exact duplicate (qid, label, t_start) instead)
 	seen, dups = set(), 0
 	for e in ev:
-		k = (e["question_id"], e["label"], round(e["t_start"], 3))
+		k = (e["question_id"], e["label"], e["t_start"], e["t_end"], e.get("gpu_energy_j"))
 		dups += k in seen
 		seen.add(k)
 	if dups:
