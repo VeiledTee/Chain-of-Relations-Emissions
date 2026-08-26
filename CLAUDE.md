@@ -204,7 +204,7 @@ Candidate labels may include:
 llm:relation_rank
 llm:entity_prune
 llm:reason
-llm:answer
+llm:direct_answer   # closed-book fallback when graph search produces no answer
 
 kg:id2name
 kg:relation_search
@@ -470,7 +470,7 @@ kg:entity_search
 llm:relation_rank
 llm:entity_prune
 llm:reason
-llm:answer
+llm:direct_answer
 ```
 
 The exact labels depend on what inspection of the CoR code proves exists.
