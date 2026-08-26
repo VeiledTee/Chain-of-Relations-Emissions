@@ -128,9 +128,13 @@ Rehearsal exposed four operational behaviours that shaped the design:
    falls back to closed-book generation: 12.4% of WebQSP and 30.0% of CWQ
    questions. Fallback trajectories are a different kind of work and are now
    labelled distinctly (`llm:direct_answer`, tagged `fallback=true`).
-3. **Strongly skewed question-level workload.** Per-question GPU energy spread
-   **75×** min→max; tool-call count spread **2007×**. Means alone will not
-   describe this distribution.
+3. **Highly variable trajectory workload.** Rehearsal traces showed substantial
+   question-to-question variation in trajectory length and operation count —
+   the rehearsal tool-call count ranged over roughly **2000×** between the
+   cheapest and most expensive WebQSP question — motivating distributional
+   rather than mean-only analysis. The magnitude of the corresponding **energy**
+   spread will be established on the validated bare-metal experimental
+   platform.
 4. **Very high `kg:id2name` call volume.** 112,302 of 142,473 WebQSP events
    (**78.8%**) were entity-name resolutions.
 
@@ -354,9 +358,10 @@ settings are **not yet frozen** and will be fixed in Phase 4.
 - [ ] Decompose hardware-grounded energy by semantic operation type; LLM vs KG
       work; `iteration`; `traversal_depth`; trajectory length; question;
       dataset; model size; paradigm
-- [ ] Report **both total and distributional** behaviour — rehearsal showed
-      question costs are heavy-tailed (75× energy spread, 2007× tool-call
-      spread), so means alone will not be sufficient
+- [ ] Report **both total and distributional** behaviour, with robust summary
+      statistics rather than means alone — rehearsal trajectories varied
+      substantially in length and operation count, so the energy distribution
+      is expected to be wide and should not be summarised by a mean
 - [ ] Compare measured energy against proxies: token counts, call counts,
       latency — to identify where proxies **agree with or diverge from**
       hardware-grounded energy
