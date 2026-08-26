@@ -13,6 +13,7 @@ import os
 import time
 
 from chain_of_relations import energy_events
+from chain_of_relations.energy_taxonomy import OperationLabel, Status
 import logging
 from openai import OpenAI
 
@@ -49,12 +50,25 @@ class LLMAPI(object):
                 f"timeout: {self.timeout}s"
             )
 
-    def generate(self, user_prompt, temperature=0.01, max_tokens=256, system_prompt=None):
+    def generate(self, user_prompt, temperature=0.01, max_tokens=256, system_prompt=None,
+                 operation_label=None):
         """
         统一使用OpenAI标准接口进行调用
         支持所有兼容OpenAI API的服务商：OpenAI、Pumpkin、SiliconFlow、DeepSeek等
+
+        operation_label names the semantic reason for this call. It comes from
+        the caller that knows why the model is being invoked -- either passed
+        explicitly, or declared with energy_events.operation(...) around the
+        call (how CoRAgent does it, so the shared tool signatures stay
+        untouched). It is never inferred from the prompt text. Paradigms that
+        have not been migrated yet declare nothing and keep the legacy
+        llm:generate label.
         """
         logging.info(f"Requesting model: {self.model_name}")
+
+        label = (operation_label
+                 or energy_events.current_operation()
+                 or OperationLabel.LLM_GENERATE)
 
         messages = []
         if system_prompt is not None:
@@ -81,6 +95,11 @@ class LLMAPI(object):
             "output_tokens": 0,
             "total_tokens": 0,
         }
+        # The event must not report a token count the API never gave us, so
+        # track whether usage was actually reported. The returned `usage` dict
+        # keeps its historical 0-defaults so caller behaviour is unchanged.
+        usage_reported = False
+        timed_out = False
 
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -99,13 +118,16 @@ class LLMAPI(object):
                         "output_tokens": getattr(usage_obj, "completion_tokens", 0),
                         "total_tokens": getattr(usage_obj, "total_tokens", 0),
                     }
+                    usage_reported = True
 
                 if result:
                     energy_events.record(
-                        "inference", "llm:generate", _t0, energy_events.mark(),
+                        label, _t0, energy_events.mark(),
+                        status=Status.OK,
+                        input_tokens=usage["input_tokens"] if usage_reported else None,
+                        output_tokens=usage["output_tokens"] if usage_reported else None,
                         attempts=attempt,
-                        input_tokens=usage.get("input_tokens", 0),
-                        output_tokens=usage.get("output_tokens", 0),
+                        usage_reported=usage_reported,
                     )
                     return result, usage
 
@@ -115,6 +137,8 @@ class LLMAPI(object):
                 )
             except Exception as e:
                 last_error = e
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    timed_out = True
                 logging.error(
                     f"API error ({e}), retry {attempt}/{self.max_retries}"
                 )
@@ -124,8 +148,14 @@ class LLMAPI(object):
 
         logging.error(f"Failed to get response after {self.max_retries} retries")
         usage["error"] = str(last_error) if last_error else "unknown_error"
+        # Terminal failure: recorded explicitly, never dropped. Its energy was
+        # really spent and must stay in the measurement.
         energy_events.record(
-            "inference", "llm:generate", _t0, energy_events.mark(),
-            attempts=self.max_retries, failed=True,
+            label, _t0, energy_events.mark(),
+            status=Status.TIMEOUT if timed_out else Status.ERROR,
+            input_tokens=usage["input_tokens"] if usage_reported else None,
+            output_tokens=usage["output_tokens"] if usage_reported else None,
+            attempts=self.max_retries,
+            error=str(last_error) if last_error else "unknown_error",
         )
         return None, usage

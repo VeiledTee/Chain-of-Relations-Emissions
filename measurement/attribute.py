@@ -1,15 +1,38 @@
-"""Join energy events to the power timeseries -> per-event/label/category/question energy.
+"""Join semantic energy events to the hardware power timeline.
 
 Inputs:
   events.jsonl  (written by chain_of_relations.energy_events during the run)
   power.csv     (written by measurement/power_logger.py on the same host clock)
 
+Outputs:
+  events_attributed.jsonl  every source event, unchanged, plus attributed
+                           energy fields, the list of domains actually
+                           measured (available_energy_domains) and whether
+                           the boundary is complete (measurement_complete).
+                           This is the canonical per-event artifact for C2.
+  energy_summary.csv       derived aggregate (by operation_label, by
+                           operation_type, by question).
+
 Method:
-  GPU:  integrate sampled GPU power (trapezoid over samples) inside each
-        event's [t_start, t_end]; events shorter than the sampling period get
-        nearest-sample power x duration (estimate, flagged in EMISSIONS.md).
+  GPU:  prefer the in-band NVML counter delta the event already carries;
+        otherwise integrate sampled GPU power (trapezoid) inside the event's
+        window. Events shorter than the sampling period get nearest-sample
+        power x duration (an estimate, flagged in EMISSIONS.md).
   RAPL: cumulative counters -> energy delta over the window, interpolated
         between samples; handles counter wraparound.
+
+Energy accounting boundary (thesis definition):
+
+    measured_energy_j = gpu_energy_j + cpu_package_energy_j + dram_energy_j
+
+The RAPL `core` domain is DIAGNOSTIC ONLY: it is a subdomain contained within
+`package`, so adding both double-counts CPU energy. cpu_core_energy_j is
+reported for diagnostics and never enters the total.
+
+Missing counters stay null. A domain the hardware did not report is not zero:
+on WSL2 there is no /sys/class/powercap at all, so cpu/dram come back null and
+measured_energy_j is null too. Reporting 0.0 there would silently understate
+the measurement boundary.
 
 Honest units:
   Per-QUESTION energy is the robust primitive (long windows, many samples).
@@ -19,16 +42,32 @@ Honest units:
 
 Usage:
   python measurement/attribute.py --events events.jsonl --power power.csv \
-      --out summary.csv
+      --out energy_summary.csv [--out-events events_attributed.jsonl]
 """
 
 import argparse
 import bisect
 import csv
 import json
+import os
 from collections import defaultdict
 
 RAPL_MAX = 2**32 * 1e0  # wraparound guard; actual max_energy_range varies
+
+#: Semantic fields carried through from the raw event to the attributed one.
+#: Attribution must never lose question id, iteration, traversal depth, step
+#: index, operation label, tokens, status or provenance.
+CARRIED_FIELDS = (
+	"schema_version", "event_id",
+	"run_id", "question_id", "dataset", "paradigm",
+	"iteration", "traversal_depth", "step_index",
+	"operation_type", "operation_label",
+	"start_timestamp", "end_timestamp", "duration_s",
+	"input_tokens", "output_tokens",
+	"status",
+	"model_name", "model_revision", "git_commit", "hardware_id",
+	"meta",
+)
 
 
 def load_power(path):
@@ -51,6 +90,32 @@ def load_power(path):
 			for i, h in rapl_idx:
 				rapl_cols[h].append(float(row[i]) if row[i] else None)
 	return ts, gpu_cols, rapl_cols
+
+
+def classify_rapl(rapl_cols):
+	"""Split RAPL columns into package / core / dram.
+
+	Column names look like rapl_<domain>_<sysfs-node>_uj, e.g.
+	rapl_package-0_intel-rapl:0_uj, rapl_core_intel-rapl:0:0_uj,
+	rapl_dram_intel-rapl:0:1_uj.
+
+	`core` is matched separately and deliberately excluded from the CPU total:
+	it is contained within `package`. `psys` is dropped for the same reason in
+	the other direction -- it is a platform-wide domain that *contains*
+	package, so counting both would double-count as well.
+	"""
+	package, core, dram = {}, {}, {}
+	for name, values in rapl_cols.items():
+		lowered = name.lower()
+		if "psys" in lowered:
+			continue  # superset of package; would double-count
+		if "dram" in lowered:
+			dram[name] = values
+		elif "package" in lowered:
+			package[name] = values
+		elif "core" in lowered:
+			core[name] = values
+	return package, core, dram
 
 
 def integrate_gpu(ts, watts, t0, t1):
@@ -77,10 +142,14 @@ def integrate_gpu(ts, watts, t0, t1):
 
 
 def rapl_delta(ts, uj, t0, t1):
-	"""Energy delta (J) from a cumulative uJ counter over [t0, t1]."""
+	"""Energy delta (J) from a cumulative uJ counter over [t0, t1].
+
+	Returns None when the counter has too few usable samples to difference:
+	an absent counter is missing data, not zero energy.
+	"""
 	pts = [(t, v) for t, v in zip(ts, uj) if v is not None]
 	if len(pts) < 2 or t1 <= t0:
-		return 0.0
+		return None
 
 	def value_at(t):
 		tt = [p[0] for p in pts]
@@ -100,76 +169,185 @@ def rapl_delta(ts, uj, t0, t1):
 	return d / 1e6  # uJ -> J
 
 
+def sum_domain(ts, cols, t0, t1):
+	"""Total energy (J) across one RAPL domain group, or None if unavailable."""
+	if not cols:
+		return None
+	parts = [rapl_delta(ts, values, t0, t1) for values in cols.values()]
+	present = [p for p in parts if p is not None]
+	if not present:
+		return None
+	return sum(present)
+
+
+def measured_total(gpu_j, cpu_package_j, dram_j):
+	"""gpu + cpu_package + dram, or None if any component is unmeasured.
+
+	`core` is never a term here. A partial sum would misrepresent the
+	measurement boundary, so an unmeasured component makes the total null.
+	"""
+	parts = (gpu_j, cpu_package_j, dram_j)
+	if any(p is None for p in parts):
+		return None
+	return sum(parts)
+
+
+def attribute_events(events, ts, gpus, rapls):
+	pkg_cols, core_cols, dram_cols = classify_rapl(rapls)
+	gpu_src = {"counter": 0, "integrated": 0}
+	rows = []
+
+	for e in events:
+		# schema-v1 keys, falling back to the pre-v1 names so an old
+		# events.jsonl still attributes rather than crashing.
+		t0 = e.get("start_timestamp", e.get("t_start"))
+		t1 = e.get("end_timestamp", e.get("t_end"))
+		if t0 is None or t1 is None:
+			continue
+
+		measured = e.get("gpu_energy_j")
+		if measured is not None:
+			gpu_j = measured
+			gpu_source = "nvml_counter"
+			gpu_src["counter"] += 1
+		elif gpus:
+			gpu_j = sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
+			gpu_source = "power_integration"
+			gpu_src["integrated"] += 1
+		else:
+			gpu_j = None
+			gpu_source = None
+
+		cpu_package_j = sum_domain(ts, pkg_cols, t0, t1)
+		cpu_core_j = sum_domain(ts, core_cols, t0, t1)  # diagnostic only
+		dram_j = sum_domain(ts, dram_cols, t0, t1)
+
+		row = {key: e.get(key) for key in CARRIED_FIELDS}
+		# Legacy readers (measurement/analyze.py, audit_runs.py) still look for
+		# these; keep them until every consumer is on schema v1.
+		row["category"] = e.get("category")
+		row["label"] = e.get("label", e.get("operation_label"))
+
+		total = measured_total(gpu_j, cpu_package_j, dram_j)
+		# Which domains of the measurement boundary this event actually has.
+		# core is excluded: it is diagnostic, not part of the boundary.
+		domains = [name for name, value in (
+			("gpu", gpu_j), ("cpu_package", cpu_package_j), ("dram", dram_j),
+		) if value is not None]
+
+		row.update({
+			"gpu_energy_j": gpu_j,
+			"gpu_energy_source": gpu_source,
+			"cpu_package_energy_j": cpu_package_j,
+			"cpu_core_energy_j": cpu_core_j,
+			"dram_energy_j": dram_j,
+			"measured_energy_j": total,
+			"available_energy_domains": domains,
+			"measurement_complete": total is not None,
+		})
+		rows.append(row)
+
+	return rows, gpu_src
+
+
+def _acc(table, key, row):
+	bucket = table[key]
+	bucket["n"] += 1
+	bucket["duration_s"] += row.get("duration_s") or 0.0
+	for field in ("gpu_energy_j", "cpu_package_energy_j", "cpu_core_energy_j",
+	              "dram_energy_j", "measured_energy_j"):
+		value = row.get(field)
+		if value is None:
+			bucket[f"{field}__missing"] += 1
+		else:
+			bucket[field] += value
+
+
+def _fmt(bucket, field):
+	"""Empty cell when no event in the bucket had the measurement."""
+	if bucket[f"{field}__missing"] and bucket["n"] == bucket[f"{field}__missing"]:
+		return ""
+	return f"{bucket[field]:.3f}"
+
+
 def main():
 	ap = argparse.ArgumentParser()
 	ap.add_argument("--events", required=True)
 	ap.add_argument("--power", required=True)
 	ap.add_argument("--out", default="energy_summary.csv")
+	ap.add_argument("--out-events", default="",
+	                help="per-event artifact (default: events_attributed.jsonl "
+	                     "beside --events)")
 	args = ap.parse_args()
 
+	out_events = args.out_events or os.path.join(
+		os.path.dirname(os.path.abspath(args.events)), "events_attributed.jsonl")
+
 	ts, gpus, rapls = load_power(args.power)
-	events = [json.loads(l) for l in open(args.events) if l.strip()]
+	events = []
+	for line in open(args.events):
+		line = line.strip()
+		if not line:
+			continue
+		try:
+			events.append(json.loads(line))
+		except json.JSONDecodeError:
+			pass  # torn line from a crash; skip, don't die
 
-	rows = []
-	gpu_src = {"counter": 0, "integrated": 0}
-	for e in events:
-		t0, t1 = e["t_start"], e["t_end"]
-		# GPU: prefer the in-band energy-counter delta (accurate for short
-		# events); fall back to power-curve integration when unavailable.
-		measured = e.get("gpu_energy_j")
-		if measured is not None:
-			gpu_j = measured
-			gpu_src["counter"] += 1
-		else:
-			gpu_j = sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
-			gpu_src["integrated"] += 1
-		cpu_j = sum(rapl_delta(ts, v, t0, t1) for name, v in rapls.items()
-		            if "package" in name or "core" in name)
-		dram_j = sum(rapl_delta(ts, v, t0, t1) for name, v in rapls.items()
-		             if "dram" in name)
-		rows.append({
-			"question_id": e.get("question_id", ""),
-			"category": e["category"],
-			"label": e["label"],
-			"duration_s": e["duration_s"],
-			"gpu_j": gpu_j, "cpu_j": cpu_j, "dram_j": dram_j,
-		})
-	print(f"GPU energy source: {gpu_src['counter']} from counter, "
+	rows, gpu_src = attribute_events(events, ts, gpus, rapls)
+
+	with open(out_events, "w") as f:
+		for row in rows:
+			f.write(json.dumps(row) + "\n")
+
+	pkg_cols, core_cols, dram_cols = classify_rapl(rapls)
+	print(f"GPU energy source: {gpu_src['counter']} from NVML counter, "
 	      f"{gpu_src['integrated']} integrated from power curve")
+	print(f"RAPL domains found: package={len(pkg_cols)} core={len(core_cols)} "
+	      f"dram={len(dram_cols)}")
+	if not pkg_cols and not dram_cols:
+		print("NOTE: no RAPL package/dram counters in power.csv -> "
+		      "cpu_package_energy_j, dram_energy_j and measured_energy_j are "
+		      "null (not zero). GPU-only measurement for this run.")
+	if core_cols:
+		print("NOTE: RAPL core is reported as a diagnostic only and is NOT "
+		      "added to measured_energy_j (it is contained within package).")
 
-	# aggregations
-	def agg(keyfn):
-		out = defaultdict(lambda: defaultdict(float))
-		for r in rows:
-			k = keyfn(r)
-			out[k]["n"] += 1
-			for c in ("duration_s", "gpu_j", "cpu_j", "dram_j"):
-				out[k][c] += r[c]
-		return out
+	by_label = defaultdict(lambda: defaultdict(float))
+	by_type = defaultdict(lambda: defaultdict(float))
+	by_q = defaultdict(lambda: defaultdict(float))
+	for row in rows:
+		_acc(by_label, row.get("operation_label") or row.get("label") or "", row)
+		_acc(by_type, row.get("operation_type") or "", row)
+		_acc(by_q, row.get("question_id") or "", row)
 
-	by_label = agg(lambda r: r["label"])
-	by_cat = agg(lambda r: r["category"])
-	by_q = agg(lambda r: r["question_id"])
-
+	fields = ("gpu_energy_j", "cpu_package_energy_j", "cpu_core_energy_j",
+	          "dram_energy_j", "measured_energy_j")
 	with open(args.out, "w", newline="") as f:
 		w = csv.writer(f)
-		w.writerow(["scope", "key", "n_events", "duration_s", "gpu_j", "cpu_j", "dram_j"])
-		for scope, table in (("category", by_cat), ("label", by_label), ("question", by_q)):
+		w.writerow(["scope", "key", "n_events", "duration_s"] + list(fields))
+		for scope, table in (("operation_type", by_type),
+		                     ("operation_label", by_label),
+		                     ("question", by_q)):
 			for k, v in sorted(table.items()):
-				w.writerow([scope, k, int(v["n"]),
-				            f"{v['duration_s']:.3f}", f"{v['gpu_j']:.2f}",
-				            f"{v['cpu_j']:.2f}", f"{v['dram_j']:.2f}"])
+				w.writerow([scope, k, int(v["n"]), f"{v['duration_s']:.3f}"]
+				           + [_fmt(v, field) for field in fields])
 
-	print(f"{len(rows)} events attributed -> {args.out}")
-	print("\n=== energy by category (J) ===")
-	for k, v in sorted(by_cat.items()):
-		print(f"  {k:<10} n={int(v['n']):>6}  gpu={v['gpu_j']:>10.1f}  "
-		      f"cpu={v['cpu_j']:>9.1f}  dram={v['dram_j']:>8.1f}  "
-		      f"({v['duration_s']:.1f}s)")
-	print("\n=== energy by label (J) ===")
+	print(f"\n{len(rows)} events attributed")
+	print(f"  per-event artifact -> {out_events}")
+	print(f"  aggregate summary  -> {args.out}")
+
+	print("\n=== energy by operation_type ===")
+	for k, v in sorted(by_type.items()):
+		print(f"  {k:<10} n={int(v['n']):>6}  gpu={_fmt(v, 'gpu_energy_j'):>12}  "
+		      f"pkg={_fmt(v, 'cpu_package_energy_j'):>10}  "
+		      f"dram={_fmt(v, 'dram_energy_j'):>10}  "
+		      f"measured={_fmt(v, 'measured_energy_j'):>12}")
+	print("\n=== energy by operation_label ===")
 	for k, v in sorted(by_label.items()):
-		print(f"  {k:<22} n={int(v['n']):>6}  gpu={v['gpu_j']:>10.1f}  "
-		      f"cpu={v['cpu_j']:>9.1f}  dram={v['dram_j']:>8.1f}")
+		print(f"  {k:<22} n={int(v['n']):>6}  gpu={_fmt(v, 'gpu_energy_j'):>12}  "
+		      f"pkg={_fmt(v, 'cpu_package_energy_j'):>10}  "
+		      f"dram={_fmt(v, 'dram_energy_j'):>10}")
 
 
 if __name__ == "__main__":

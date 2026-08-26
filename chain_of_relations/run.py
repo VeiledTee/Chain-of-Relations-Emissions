@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -343,6 +344,21 @@ def main() -> None:
 		level=getattr(logging, args.log_level.upper(), logging.INFO),
 		format="%(asctime)s | %(levelname)s | %(message)s",
 	)
+
+	# Run-scoped measurement provenance, configured once here rather than
+	# threaded through every event. Missing optional provenance is left empty
+	# (serialized as null) and must never break the run.
+	energy_events.configure(
+		run_id=os.getenv("ENERGY_RUN_ID", "") or uuid.uuid4().hex,
+		dataset=args.dataset,
+		paradigm=args.method,
+		model_name=model_name,
+		model_revision=os.getenv("MODEL_REVISION", ""),
+		git_commit=os.getenv("ENERGY_GIT_COMMIT", "") or energy_events.detect_git_commit(),
+		hardware_id=os.getenv("ENERGY_HARDWARE_ID", "") or energy_events.detect_hardware_id(),
+	)
+	if energy_events.enabled():
+		logging.info("energy events enabled | run_context=%s", energy_events.run_context())
 
 	datas, indicator, dataset_path = prepare_dataset(args.dataset)
 	logging.info(f"Loaded dataset: {dataset_path}, size={len(datas)}")

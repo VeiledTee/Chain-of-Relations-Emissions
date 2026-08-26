@@ -50,14 +50,21 @@ def summarize(events):
 	by_cat = defaultdict(lambda: defaultdict(float))
 	by_label = defaultdict(lambda: defaultdict(float))
 	by_q = defaultdict(lambda: defaultdict(float))
+	by_depth = defaultdict(lambda: defaultdict(float))
+	max_iteration = {}
 	retries = 0
+	failed = 0
 	gpu_measured = gpu_missing = 0
 	tok_in = tok_out = 0
 
 	for e in events:
-		cat, lab, q = e["category"], e["label"], e.get("question_id", "")
+		# schema-v1 canonical keys, falling back to the pre-v1 names so an
+		# events.jsonl written before the migration still analyses.
+		cat = e.get("operation_type") or e.get("category")
+		lab = e.get("operation_label") or e.get("label")
+		q = e.get("question_id") or ""
 		gpu = e.get("gpu_energy_j")
-		meta = e.get("meta", {})
+		meta = e.get("meta", {}) or {}
 		dur = e.get("duration_s", 0.0)
 
 		if gpu is None:
@@ -66,24 +73,39 @@ def summarize(events):
 		else:
 			gpu_measured += 1
 
-		for tbl, key in ((by_cat, cat), (by_label, lab), (by_q, q)):
+		# traversal_depth is null outside the DFS (the closed-book fallback);
+		# bucket that separately rather than folding it into depth 0.
+		depth = e.get("traversal_depth")
+		depth_key = "outside_dfs" if depth is None else int(depth)
+		iters = e.get("iteration")
+		if iters is not None:
+			max_iteration[q] = max(max_iteration.get(q, 0), int(iters))
+
+		for tbl, key in ((by_cat, cat), (by_label, lab), (by_q, q),
+		                 (by_depth, depth_key)):
 			tbl[key]["n"] += 1
 			tbl[key]["gpu_j"] += gpu
 			tbl[key]["dur_s"] += dur
 
 		if meta.get("attempts", 1) and meta.get("attempts", 1) > 1:
 			retries += 1
-		tok_in += meta.get("input_tokens", 0) or 0
-		tok_out += meta.get("output_tokens", 0) or 0
+		# tokens are top-level in schema v1; meta is the pre-v1 location
+		tok_in += (e.get("input_tokens") if e.get("input_tokens") is not None
+		           else meta.get("input_tokens", 0)) or 0
+		tok_out += (e.get("output_tokens") if e.get("output_tokens") is not None
+		            else meta.get("output_tokens", 0)) or 0
+		if e.get("status") not in (None, "ok"):
+			failed += 1
 		# also record per-question LLM-call and tool-call counts
-		if cat == "inference":
+		if cat in ("llm", "inference"):
 			by_q[q]["llm_calls"] += 1
 		else:
 			by_q[q]["tool_calls"] += 1
 
 	return {
 		"by_cat": by_cat, "by_label": by_label, "by_q": by_q,
-		"retries": retries, "gpu_measured": gpu_measured,
+		"by_depth": by_depth, "max_iteration": max_iteration,
+		"retries": retries, "failed": failed, "gpu_measured": gpu_measured,
 		"gpu_missing": gpu_missing, "tok_in": tok_in, "tok_out": tok_out,
 		"n_events": len(events), "n_questions": len(by_q),
 	}
@@ -98,7 +120,7 @@ def write_tables(s, run_dir):
 	L = []
 	L.append(f"# Analysis of {run_dir}")
 	L.append(f"events={s['n_events']}  questions={s['n_questions']}  "
-	         f"retries={s['retries']}  "
+	         f"retries={s['retries']}  failed={s['failed']}  "
 	         f"gpu_counter={s['gpu_measured']}  gpu_missing={s['gpu_missing']}")
 	L.append("")
 
@@ -121,6 +143,26 @@ def write_tables(s, run_dir):
 		perc = v["gpu_j"] / v["n"] if v["n"] else 0
 		L.append(f"{k:<22} {int(v['n']):>7} {v['gpu_j']:>12.1f} {perc:>9.3f} {v['dur_s']:>8.1f}")
 	L.append("")
+
+	# per traversal depth (null depth = work outside the DFS)
+	if s["by_depth"]:
+		L.append("## per traversal depth")
+		L.append(f"{'depth':<12} {'events':>7} {'gpu_J':>12} {'J/event':>9} {'dur_s':>8}")
+		for k in sorted(s["by_depth"], key=lambda x: (isinstance(x, str), x)):
+			v = s["by_depth"][k]
+			per = v["gpu_j"] / v["n"] if v["n"] else 0
+			L.append(f"{str(k):<12} {int(v['n']):>7} {v['gpu_j']:>12.1f} "
+			         f"{per:>9.3f} {v['dur_s']:>8.1f}")
+		L.append("")
+
+	# control-loop iterations per question
+	if s["max_iteration"]:
+		vals = sorted(s["max_iteration"].values())
+		L.append("## control-loop iterations per question")
+		L.append(f"min={vals[0]}  median={vals[len(vals) // 2]}  max={vals[-1]}  "
+		         f"(iteration counts decisions; traversal depth above can fall "
+		         f"again on backtrack)")
+		L.append("")
 
 	# tokens
 	L.append("## tokens")

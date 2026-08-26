@@ -18,6 +18,9 @@ import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 
+from chain_of_relations import energy_events
+from chain_of_relations import energy_taxonomy
+from chain_of_relations.energy_taxonomy import OperationLabel
 from chain_of_relations.llm_api import LLMAPI
 from chain_of_relations.kg_backend import KGBackend, get_default_backend
 from chain_of_relations.schema import Entity, Relation
@@ -163,6 +166,44 @@ class CoRAgent:
 			max_tokens=max_tokens,
 			system_prompt=system_prompt,
 		)
+
+	def _llm_generate_for(self, operation_label, **extra_meta):
+		"""An llm_generate bound to one semantic CoR stage.
+
+		The shared tools (tools/relation_prune.py, tools/reasoning.py, ...) are
+		also used by ToG and PoG, so they must not learn about the taxonomy.
+		Instead this agent -- the caller that knows *why* the model is being
+		invoked -- binds the label here and the tool calls it unchanged. The
+		label is declared, never inferred from prompt text.
+
+		Retry accounting has two distinct levels, and they must not be
+		conflated:
+
+		  meta.attempts      retries *inside* one LLMAPI.generate call, which
+		                     collapse into a single event.
+		  meta.tool_attempt  the shared tool's own retry loop, where each pass
+		                     is a separate llm_generate call and therefore a
+		                     separate event. Counted here because a fresh
+		                     closure is created per stage invocation.
+
+		So attempts=3, tool_attempt=2 means the second tool-level pass, whose
+		single event covers three API attempts.
+		"""
+		state = {"tool_attempt": 0}
+
+		def generate(user_prompt, temperature, max_tokens, system_prompt=None):
+			state["tool_attempt"] += 1
+			with energy_events.operation(operation_label), \
+			     energy_events.event_meta(tool_attempt=state["tool_attempt"],
+			                              **extra_meta):
+				return self._llm_generate(
+					user_prompt=user_prompt,
+					temperature=temperature,
+					max_tokens=max_tokens,
+					system_prompt=system_prompt,
+				)
+
+		return generate
 
 	@staticmethod
 	def _reasoning_path_to_str(
@@ -399,7 +440,7 @@ class CoRAgent:
 				temperature=self.temperature_exploration,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(OperationLabel.LLM_RELATION_RANK),
 		)
 		prompt_history.append(
 			self._with_trace(
@@ -470,7 +511,7 @@ class CoRAgent:
 				temperature=self.temperature_reasoning,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(OperationLabel.LLM_REASON),
 		)
 		prompt_history.append(
 			self._with_trace(
@@ -530,7 +571,7 @@ class CoRAgent:
 				temperature=self.temperature_reasoning,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(OperationLabel.LLM_ANSWER_FILTER),
 		)
 
 		prompt_history.append(
@@ -559,7 +600,11 @@ class CoRAgent:
 				temperature=self.temperature_reasoning,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(
+				OperationLabel.LLM_DIRECT_ANSWER,
+				fallback=True,
+				fallback_reason=energy_taxonomy.FALLBACK_NO_GRAPH_ANSWER,
+			),
 		)
 		prompt_history.append(
 			self._with_trace(
@@ -617,6 +662,13 @@ class CoRAgent:
 			node = current_state.node
 			current_path = current_state.path
 			current_depth = current_state.depth
+			# One pass of the control loop = one iteration, which only ever
+			# increases; traversal_depth is the depth of the state being
+			# expanded and falls again when the search backtracks. Set (not
+			# scoped) because the loop body uses continue/break/return freely;
+			# every event emitted while processing this state inherits both.
+			energy_events.begin_iteration()
+			energy_events.set_traversal_depth(current_depth)
 
 			if isinstance(node, Entity):
 				relation_chain: List[Relation] = [item for item in current_path[1:] if isinstance(item, Relation)]
@@ -863,6 +915,11 @@ class CoRAgent:
 				logging.warning(f"Unknown action from reasoning: {action}, raw={response}")
 				continue
 
+		# The closed-book fallback is still a control-loop step, so iteration
+		# keeps advancing, but it runs outside the DFS and so has no
+		# meaningful traversal depth.
+		energy_events.begin_iteration()
+		energy_events.set_traversal_depth(None)
 		prompt_before = len(prompt_history)
 		logging.info("[CoR] DFS ended without final answer, fallback to generate_directly")
 		generated = self.generate_directly(question=question, prompt_history=prompt_history)

@@ -12,7 +12,8 @@ Usage (passthrough after --):
       --depth 3 --temperature_exploration 0.01 --temperature_reasoning 0.01 \
       --run_size 5 --save_detail true
 Outputs in measurement/runs/<tag>/: events.jsonl, power.csv,
-energy_summary.csv, codecarbon/ (if installed), run.log
+events_attributed.jsonl, energy_summary.csv, codecarbon/ (if installed),
+run.log
 """
 
 import argparse
@@ -40,6 +41,8 @@ def main():
 	events_f = os.path.join(outdir, "events.jsonl")
 	power_f = os.path.join(outdir, "power.csv")
 	log_f = os.path.join(outdir, "run.log")
+	attributed_f = os.path.join(outdir, "events_attributed.jsonl")
+	t_run_id = time.time()
 
 	# 1. power logger
 	logger = subprocess.Popen(
@@ -61,8 +64,12 @@ def main():
 	except Exception as e:
 		print(f"CodeCarbon unavailable ({e}) - continuing with raw power log only")
 
-	# 3. the run, with the event log enabled
-	env = dict(os.environ, ENERGY_EVENTS_FILE=events_f)
+	# 3. the run, with the event log enabled. run_id is fixed here so every
+	# artifact in this directory shares one identifier; the run process fills
+	# in the rest of the provenance (git commit, hardware, model).
+	env = dict(os.environ,
+	           ENERGY_EVENTS_FILE=events_f,
+	           ENERGY_RUN_ID=os.environ.get("ENERGY_RUN_ID") or f"{args.tag}-{int(t_run_id)}")
 	t0 = time.time()
 	with open(log_f, "w") as lf:
 		rc = subprocess.call(
@@ -83,7 +90,8 @@ def main():
 	subprocess.call(
 		[sys.executable, os.path.join(HERE, "attribute.py"),
 		 "--events", events_f, "--power", power_f,
-		 "--out", os.path.join(outdir, "energy_summary.csv")])
+		 "--out", os.path.join(outdir, "energy_summary.csv"),
+		 "--out-events", attributed_f])
 	print(f"artifacts: {outdir}")
 
 

@@ -19,6 +19,7 @@ import yaml
 from SPARQLWrapper import SPARQLWrapper, JSON
 
 from chain_of_relations import energy_events
+from chain_of_relations.energy_taxonomy import OperationLabel, Status
 
 
 SPARQLPATH = os.getenv(
@@ -135,6 +136,7 @@ def execurte_sparql_with_meta(sparql_txt):
 			sparql.setTimeout(SPARQL_TIMEOUT)
 			results = sparql.query().convert()
 			energy_events.record_sparql(sparql_txt, _t0, energy_events.mark(),
+				status=Status.OK,
 				attempts=i + 1, rows=len(results["results"]["bindings"]))
 			return {
 				"rows": results["results"]["bindings"],
@@ -157,7 +159,8 @@ def execurte_sparql_with_meta(sparql_txt):
 		f"SPARQL query failed after 3 attempts on endpoint={SPARQLPATH}:\n{sparql_txt}"
 	)
 	energy_events.record_sparql(sparql_txt, _t0, energy_events.mark(),
-		attempts=3, failed=True, timed_out=timed_out)
+		status=Status.TIMEOUT if timed_out else Status.ERROR,
+		attempts=3, timed_out=timed_out, error=last_error)
 	return {
 		"rows": [],
 		"status": "timeout" if timed_out else "error",
@@ -214,6 +217,8 @@ def id2entity_name_or_type(entity_id):
 
 	sparql_str = _render_id2name_query(entity_id)
 	_t0 = energy_events.mark()
+	last_error = ""
+	timed_out = False
 	for i in range(3):
 		try:
 			sparql = SPARQLWrapper(SPARQLPATH)
@@ -221,7 +226,11 @@ def id2entity_name_or_type(entity_id):
 			sparql.setReturnFormat(JSON)
 			sparql.setTimeout(SPARQL_TIMEOUT)
 			results = sparql.query().convert()
-			energy_events.record_sparql(sparql_str, _t0, energy_events.mark(), attempts=i + 1)
+			# Semantics of this call site are unambiguous regardless of query
+			# shape, so pin the label rather than relying on classification.
+			energy_events.record_sparql(sparql_str, _t0, energy_events.mark(),
+				label=OperationLabel.KG_ID2NAME, status=Status.OK, attempts=i + 1,
+				entity_count=1, batched=False)
 			bindings = results.get("results", {}).get("bindings", [])
 			if len(bindings) == 0:
 				_ID2NAME_CACHE[entity_id] = "UnName_Entity"
@@ -246,12 +255,22 @@ def id2entity_name_or_type(entity_id):
 			_ID2NAME_CACHE[entity_id] = resolved
 			return resolved
 		except BaseException as e:
+			last_error = str(e)
+			if "timed out" in last_error.lower() or "timeout" in last_error.lower():
+				timed_out = True
 			logging.error(
 				f"Error in id2entity_name_or_type (attempt {i+1}/3) entity={entity_id} "
 				f"endpoint={SPARQLPATH}: {e}"
 			)
 			if i < 2:
 				time.sleep(1)
+	# Terminal failure. Its energy was really spent, so record it explicitly
+	# rather than dropping the event.
+	energy_events.record_sparql(sparql_str, _t0, energy_events.mark(),
+		label=OperationLabel.KG_ID2NAME,
+		status=Status.TIMEOUT if timed_out else Status.ERROR,
+		attempts=3, timed_out=timed_out, error=last_error,
+		entity_count=1, batched=False)
 	_ID2NAME_CACHE[entity_id] = "UnName_Entity"
 	return "UnName_Entity"
 
@@ -298,7 +317,16 @@ def id2entity_names(entity_ids: List[str]) -> Dict[str, str]:
 			)
 
 			query = _render_ids2names_query(chunk)
-			meta = execurte_sparql_with_meta(query)
+			# One event per real round trip -- no synthetic per-entity events.
+			# The requested-entity count rides along so analysis can normalize
+			# energy per entity later if that is useful.
+			with energy_events.event_meta(
+				entity_count=len(chunk),
+				batch_index=batch_index,
+				total_batches=total_batches,
+				batched=True,
+			):
+				meta = execurte_sparql_with_meta(query)
 			rows = meta.get("rows", []) or []
 
 			best: Dict[str, Tuple[int, str]] = {}
