@@ -29,20 +29,48 @@ try:
 except Exception:
 	_NGPU, _HANDLES = 0, []
 
-_RAPL = sorted(glob.glob("/sys/class/powercap/intel-rapl:*/energy_uj")
-               + glob.glob("/sys/class/powercap/intel-rapl:*:*/energy_uj"))
+def _discover_rapl():
+	"""Every readable CPU energy counter, whatever the vendor exposes.
+
+	Not hardcoded to intel-rapl: some hosts expose their RAPL MSRs through the
+	amd_energy *hwmon* driver rather than powercap, and globbing only
+	intel-rapl would make such a host look identical to one with no CPU energy
+	counters at all. Whatever is found is labelled by its own domain name;
+	attribute.py decides which domains are additive. No CPU vendor is assumed.
+	"""
+	paths = sorted(glob.glob("/sys/class/powercap/*/energy_uj"))
+	for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+		try:
+			if open(os.path.join(hwmon, "name")).read().strip() != "amd_energy":
+				continue
+		except Exception:
+			continue
+		paths.extend(sorted(glob.glob(os.path.join(hwmon, "energy*_input"))))
+	return paths
+
+
+_RAPL = _discover_rapl()
+
+
+def _zone_name(path):
+	directory = os.path.dirname(path)
+	# powercap zones carry a sibling `name`; amd_energy hwmon uses per-input labels
+	label_file = path.replace("_input", "_label")
+	for candidate in (os.path.join(directory, "name"), label_file):
+		if candidate == path:
+			continue
+		try:
+			value = open(candidate).read().strip()
+			if value and value != "amd_energy":
+				return value
+		except Exception:
+			continue
+	return os.path.basename(directory)
 
 
 def _rapl_names():
-	names = []
-	for path in _RAPL:
-		d = os.path.dirname(path)
-		try:
-			name = open(os.path.join(d, "name")).read().strip()
-		except Exception:
-			name = os.path.basename(d)
-		names.append(f"rapl_{name}_{os.path.basename(d)}_uj")
-	return names
+	return [f"rapl_{_zone_name(path)}_{os.path.basename(os.path.dirname(path))}_uj"
+	        for path in _RAPL]
 
 
 def main():

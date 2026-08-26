@@ -50,7 +50,11 @@ import bisect
 import csv
 import json
 import os
+import sys
 from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import trajectory
 
 RAPL_MAX = 2**32 * 1e0  # wraparound guard; actual max_energy_range varies
 
@@ -103,16 +107,29 @@ def classify_rapl(rapl_cols):
 	it is contained within `package`. `psys` is dropped for the same reason in
 	the other direction -- it is a platform-wide domain that *contains*
 	package, so counting both would double-count as well.
+
+	Match order matters:
+	  * `uncore` is tested before `core`, because the string "uncore" contains
+	    "core" and would otherwise be filed as the core domain, silently
+	    inflating the cpu_core diagnostic. uncore is dropped: it is neither
+	    additive nor the core diagnostic.
+	  * `socket` is accepted as a package synonym, because some drivers label
+	    the package-equivalent domain that way. Domains are classified by the
+	    name the host reports; no CPU vendor is assumed. A host that exposes
+	    no DRAM domain simply cannot complete the additive boundary, and
+	    measured_energy_j stays null there.
 	"""
 	package, core, dram = {}, {}, {}
 	for name, values in rapl_cols.items():
 		lowered = name.lower()
 		if "psys" in lowered:
-			continue  # superset of package; would double-count
+			continue  # platform superset of package; would double-count
 		if "dram" in lowered:
 			dram[name] = values
-		elif "package" in lowered:
+		elif "package" in lowered or "socket" in lowered:
 			package[name] = values
+		elif "uncore" in lowered:
+			continue  # not additive, and not the core diagnostic
 		elif "core" in lowered:
 			core[name] = values
 	return package, core, dram
@@ -333,9 +350,39 @@ def main():
 				w.writerow([scope, k, int(v["n"]), f"{v['duration_s']:.3f}"]
 				           + [_fmt(v, field) for field in fields])
 
+	# --- trajectory accounting ------------------------------------------
+	# The whole-question window energy is derived from the sampled power
+	# timeline, while per-event GPU energy comes from the NVML counter. Those
+	# are two different instruments measuring the same quantity, so the
+	# reconciliation below is a genuine cross-instrument check rather than a
+	# tautology. Where no power samples exist the window energy is unavailable
+	# and coverage is reported as null rather than a circular 1.0.
+	def window_energy(t0, t1):
+		if t0 is None or t1 is None:
+			return None
+		gpu_w = (sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
+		         if gpus else None)
+		pkg_w = sum_domain(ts, pkg_cols, t0, t1)
+		dram_w = sum_domain(ts, dram_cols, t0, t1)
+		return {
+			"gpu_energy_j": gpu_w,
+			"cpu_package_energy_j": pkg_w,
+			"dram_energy_j": dram_w,
+			"measured_energy_j": measured_total(gpu_w, pkg_w, dram_w),
+		}
+
+	traj_rows = trajectory.accumulate(rows, window_energy=window_energy if ts else None)
+	traj_summary = trajectory.summarize(traj_rows)
+	traj_csv = os.path.join(os.path.dirname(os.path.abspath(out_events)),
+	                        "trajectory_summary.csv")
+	traj_json = os.path.join(os.path.dirname(os.path.abspath(out_events)),
+	                         "trajectory_summary.json")
+	trajectory.write_artifacts(traj_rows, traj_summary, traj_csv, traj_json)
+
 	print(f"\n{len(rows)} events attributed")
 	print(f"  per-event artifact -> {out_events}")
 	print(f"  aggregate summary  -> {args.out}")
+	print(f"  trajectory summary -> {traj_csv}")
 
 	print("\n=== energy by operation_type ===")
 	for k, v in sorted(by_type.items()):
@@ -348,6 +395,9 @@ def main():
 		print(f"  {k:<22} n={int(v['n']):>6}  gpu={_fmt(v, 'gpu_energy_j'):>12}  "
 		      f"pkg={_fmt(v, 'cpu_package_energy_j'):>10}  "
 		      f"dram={_fmt(v, 'dram_energy_j'):>10}")
+
+	print()
+	print(trajectory.render(traj_rows, traj_summary))
 
 
 if __name__ == "__main__":
