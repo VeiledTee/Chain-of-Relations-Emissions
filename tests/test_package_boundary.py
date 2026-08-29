@@ -235,7 +235,7 @@ class TestLazyPackageImport(unittest.TestCase):
 	be trusted to have left the machine alone.
 	"""
 
-	CLI_MODULES = ("attribution", "validation")
+	CLI_MODULES = ("aggregate", "attribution", "validation")
 
 	def run_python(self, *args):
 		return subprocess.run([sys.executable, *args], cwd=ROOT,
@@ -252,7 +252,7 @@ class TestLazyPackageImport(unittest.TestCase):
 
 	def test_every_public_submodule_is_still_importable_by_name(self):
 		import agent_energy_profiler as aep
-		for name in ("attribution", "carbon", "events", "labels",
+		for name in ("aggregate", "attribution", "carbon", "events", "labels",
 		             "profiler", "schema", "trajectory"):
 			with self.subTest(name=name):
 				attribute = getattr(aep, name)
@@ -262,7 +262,7 @@ class TestLazyPackageImport(unittest.TestCase):
 
 	def test_from_import_form_still_works(self):
 		code = ("import sys; sys.path.insert(0, %r);"
-		        "from agent_energy_profiler import attribution, "
+		        "from agent_energy_profiler import aggregate, attribution, "
 		        "carbon, events, labels, profiler, schema, trajectory;"
 		        "from agent_energy_profiler import span, SCHEMA_VERSION, Status;"
 		        "assert SCHEMA_VERSION == 1;"

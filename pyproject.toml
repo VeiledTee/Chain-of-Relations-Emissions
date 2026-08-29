@@ -21,6 +21,7 @@ gpu = ["pynvml>=11.5"]
 aep-sample = "agent_energy_profiler.sampling:main"
 aep-attribute = "agent_energy_profiler.attribution:main"
 aep-validate = "agent_energy_profiler.validation:main"
+aep-aggregate = "agent_energy_profiler.aggregate:main"
 
 [tool.setuptools]
 # Only the profiler is packaged. The host agents (chain_of_relations) and the

@@ -19,6 +19,11 @@ Four layers, kept separate on purpose:
     2. sampling.py     hardware counter timeline      -> power.csv
     3. attribution.py  joins 1 and 2                  -> events_attributed.jsonl
     4. trajectory.py   reconciliation and coverage    -> trajectory_summary.*
+    5. aggregate.py    long-format rollups            -> plotting-ready tables
+
+Layer 5 is derived: it never re-measures anything, and refuses to report a
+share, a residual or a total it cannot defend from layers 1-4. Plotting lives
+outside this package.
 
 Measurement boundary, enforced identically at every layer:
 
@@ -58,8 +63,8 @@ __version__ = "0.1.0"
 #: The set matches the previously eager one exactly: this changes when a
 #: submodule is loaded, never which names exist.
 _SUBMODULES = frozenset({
-	"attribution", "carbon", "events", "labels", "profiler", "schema",
-	"trajectory",
+	"aggregate", "attribution", "carbon", "events", "labels", "profiler",
+	"schema", "trajectory",
 })
 
 #: Values re-exported from submodules, resolved the same way.
@@ -70,8 +75,8 @@ _REEXPORTS = {
 }
 
 __all__ = [
-	"attribution", "carbon", "events", "labels", "profiler", "schema",
-	"trajectory", "span", "SCHEMA_VERSION", "Status", "__version__",
+	"aggregate", "attribution", "carbon", "events", "labels", "profiler",
+	"schema", "trajectory", "span", "SCHEMA_VERSION", "Status", "__version__",
 ]
 
 

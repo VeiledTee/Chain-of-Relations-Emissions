@@ -681,6 +681,7 @@ agent_energy_profiler             ->  chain_of_relations        FORBIDDEN
 | Hardware timeline | `agent_energy_profiler/sampling.py` | `measurement/power_logger.py` |
 | Attribution | `agent_energy_profiler/attribution.py` | `measurement/attribute.py` |
 | Trajectory accounting | `agent_energy_profiler/trajectory.py` | `measurement/trajectory.py` |
+| Long-format rollups | `agent_energy_profiler/aggregate.py` | — |
 | Capability probe | `agent_energy_profiler/validation.py` | `measurement/validate_hardware.py` |
 | Counter access | `agent_energy_profiler/hardware/{nvml,rapl,discovery}.py` | — |
 | Joules -> CO2e | `agent_energy_profiler/carbon.py` | — |
