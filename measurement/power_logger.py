@@ -1,12 +1,21 @@
 """Whole-machine power sampler. Run on the HOST (not in a container).
 
 Samples at ~10 Hz:
-  - GPU power (W) via NVML, per GPU            -> works on Linux and WSL2
+  - GPU cumulative energy (mJ) via NVML        -> the GPU measurement instrument
+  - GPU power (W) via NVML, per GPU            -> diagnostic only
   - CPU package + DRAM energy (uJ) via RAPL    -> bare-metal Linux only
     (silently absent on WSL2 / locked HPC nodes; GPU columns still logged)
 
-Output CSV columns: t, gpu<i>_w ..., rapl_<domain>_uj ...
-RAPL counters are cumulative energy; attribute.py differences them.
+Output CSV columns:
+  t, gpu<i>_w ..., gpu<i>_energy_mj ..., rapl_<domain>_uj ...
+
+Every energy column is a CUMULATIVE counter that attribute.py differences
+across a window. gpu<i>_w is instantaneous power, retained for diagnostics
+(mean/peak power, ramp analysis, time-series plots) and NOT used as the
+primary trajectory energy reference: integrating ~10 Hz point samples resolves
+fast inference power transients poorly and errs in both directions, with error
+growing as windows shorten. That previously produced attribution coverage > 1
+on short trajectories.
 
 Usage:
   python measurement/power_logger.py --out power.csv          # Ctrl-C to stop
@@ -52,6 +61,17 @@ def _discover_rapl():
 _RAPL = _discover_rapl()
 
 
+def _gpu_energy_supported():
+	"""Whether the cumulative GPU energy register is readable on this host."""
+	for h in _HANDLES:
+		try:
+			pynvml.nvmlDeviceGetTotalEnergyConsumption(h)
+			return True
+		except Exception:
+			return False
+	return False
+
+
 def _zone_name(path):
 	directory = os.path.dirname(path)
 	# powercap zones carry a sibling `name`; amd_energy hwmon uses per-input labels
@@ -84,9 +104,22 @@ def main():
 	signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
 	signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
-	header = ["t"] + [f"gpu{i}_w" for i in range(_NGPU)] + _rapl_names()
+	# Two GPU column families, deliberately distinct:
+	#   gpu<i>_w          instantaneous power (W)  -- DIAGNOSTIC only
+	#   gpu<i>_energy_mj  cumulative energy (mJ)   -- the measurement instrument
+	# The cumulative counter is the same hardware register the in-band event
+	# log reads, so trajectory totals and per-event energy come from one
+	# instrument. Integrated sampled power is never the primary reference.
+	header = (["t"]
+	          + [f"gpu{i}_w" for i in range(_NGPU)]
+	          + [f"gpu{i}_energy_mj" for i in range(_NGPU)]
+	          + _rapl_names())
 	if _NGPU == 0:
 		print("WARNING: no NVML GPUs visible", file=sys.stderr)
+	elif not _gpu_energy_supported():
+		print("WARNING: NVML present but cumulative GPU energy unavailable -"
+		      " trajectory GPU energy will be reported as unavailable, not"
+		      " silently substituted with integrated power", file=sys.stderr)
 	if not _RAPL:
 		print("WARNING: no RAPL domains readable (WSL2/shared node/permissions?)"
 		      " - GPU-only logging", file=sys.stderr)
@@ -99,6 +132,11 @@ def main():
 			for h in _HANDLES:
 				try:
 					row.append(pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0)  # mW -> W
+				except Exception:
+					row.append("")
+			for h in _HANDLES:
+				try:
+					row.append(pynvml.nvmlDeviceGetTotalEnergyConsumption(h))
 				except Exception:
 					row.append("")
 			for path in _RAPL:

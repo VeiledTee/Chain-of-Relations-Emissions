@@ -16,6 +16,39 @@ energy inside the trajectory window that belongs to no named operation.
 Making that residual explicit is the honest result; hiding it inside named
 operations would overstate operation-level attribution.
 
+Like-for-like instruments
+-------------------------
+Both sides of the reconciliation must come from the SAME physical instrument,
+otherwise the residual measures instrument disagreement rather than
+unattributed work. For every domain the trajectory reference is a cumulative
+hardware counter differenced across the window:
+
+    trajectory_gpu_energy_j          = nvml_cumulative_end - nvml_cumulative_start
+    trajectory_cpu_package_energy_j  = rapl_package_end   - rapl_package_start
+    trajectory_dram_energy_j         = rapl_dram_end      - rapl_dram_start
+
+matching how per-event energy is produced. Integrated ~10 Hz sampled power is
+NOT a reference; it resolves fast inference transients poorly and errs in both
+directions (measured ratio to the counter spans roughly 0.91-1.20 on real
+trajectories), with error growing as windows shorten. That previously drove
+coverage above 1 on short trajectories. It survives only as the separately
+named diagnostic `sampled_gpu_energy_estimate_j`, alongside mean/peak power.
+
+A domain whose counter is unavailable is reported as unavailable. It is never
+back-filled from the sampled estimate.
+
+Residual sign
+-------------
+    unattributed_energy_j = trajectory_energy_j - sum_attributed_j
+
+Small NEGATIVE residuals are expected and are NOT clamped to zero. The event
+log reads the counter in-band at exact event boundaries, while the trajectory
+reference interpolates the sampler's reads to the trajectory edges; counter
+update granularity and boundary timing can therefore place slightly more
+energy inside the events than the interpolated window shows. Clamping would
+hide exactly the instrument behaviour this reconciliation exists to expose.
+Magnitude is reported so it can be characterised.
+
 Overlap caveat
 --------------
 Summing per-event energy is only valid when events do not overlap in time.
@@ -34,6 +67,13 @@ from collections import defaultdict
 #: Energy fields carried per trajectory, mirroring the event boundary.
 ENERGY_FIELDS = ("gpu_energy_j", "cpu_package_energy_j", "dram_energy_j",
                  "measured_energy_j")
+
+#: Diagnostic fields copied verbatim from the window measurement. These are
+#: NOT energy references and must never be used as a coverage denominator.
+#: sampled_gpu_energy_estimate_j in particular is integrated ~10 Hz power and
+#: is kept only for comparison against the cumulative counter.
+DIAGNOSTIC_FIELDS = ("gpu_energy_source", "sampled_gpu_energy_estimate_j",
+                     "mean_gpu_power_w", "peak_gpu_power_w")
 
 
 def event_window(event):
@@ -181,6 +221,17 @@ def accumulate(events, window_energy=None):
 				row[f"unattributed_{field}"] = total - attributed
 				row[f"coverage_{field}"] = (attributed / total) if total else None
 
+		# Diagnostics travel alongside the references but are never one.
+		if measured_window is not None:
+			for field in DIAGNOSTIC_FIELDS:
+				row[field] = measured_window.get(field)
+			sampled = measured_window.get("sampled_gpu_energy_estimate_j")
+			counter = row.get("trajectory_gpu_energy_j")
+			# How far the ~10 Hz integrated estimate sits from the counter.
+			# Recorded to characterise the sampler, not to correct anything.
+			row["sampled_vs_counter_ratio"] = (
+				sampled / counter if (sampled is not None and counter) else None)
+
 		# Coverage is only meaningful against an independently measured window.
 		row["coverage_is_independent"] = measured_window is not None
 		if not row["coverage_is_independent"]:
@@ -225,6 +276,30 @@ def summarize(rows):
 		summary["gpu_coverage_median"] = ordered[len(ordered) // 2]
 		summary["gpu_coverage_max"] = ordered[-1]
 		summary["n_coverage_above_one"] = sum(1 for c in coverages if c > 1.0)
+
+	# Residual characterisation. Negative residuals are preserved, counted and
+	# reported -- never clamped -- so counter-boundary behaviour stays visible.
+	residuals = [r["unattributed_gpu_energy_j"] for r in rows
+	             if r.get("unattributed_gpu_energy_j") is not None]
+	if residuals:
+		ordered = sorted(residuals)
+		summary["gpu_residual_min_j"] = ordered[0]
+		summary["gpu_residual_median_j"] = ordered[len(ordered) // 2]
+		summary["gpu_residual_max_j"] = ordered[-1]
+		summary["n_negative_gpu_residual"] = sum(1 for v in residuals if v < 0)
+		summary["max_abs_negative_gpu_residual_j"] = (
+			abs(min(residuals)) if min(residuals) < 0 else 0.0)
+
+	sources = {r.get("gpu_energy_source") for r in rows if r.get("gpu_energy_source")}
+	if sources:
+		summary["gpu_energy_sources"] = sorted(sources)
+	ratios = [r["sampled_vs_counter_ratio"] for r in rows
+	          if r.get("sampled_vs_counter_ratio") is not None]
+	if ratios:
+		ordered = sorted(ratios)
+		summary["sampled_vs_counter_ratio_median"] = ordered[len(ordered) // 2]
+		summary["sampled_vs_counter_ratio_min"] = ordered[0]
+		summary["sampled_vs_counter_ratio_max"] = ordered[-1]
 	return summary
 
 
@@ -243,16 +318,33 @@ def render(rows, summary):
 		L.append("coverage: NOT COMPUTED -- no independent whole-window energy "
 		         "available, so a coverage figure would be circular (1.0 by "
 		         "construction). Reporting wall-time attribution only.")
+	if summary.get("gpu_energy_sources"):
+		L.append(f"GPU trajectory reference: {summary['gpu_energy_sources']}")
+	if "n_negative_gpu_residual" in summary:
+		L.append(f"GPU residual (traj - sum_events): "
+		         f"min={summary['gpu_residual_min_j']:.3f}J "
+		         f"median={summary['gpu_residual_median_j']:.3f}J "
+		         f"max={summary['gpu_residual_max_j']:.3f}J   "
+		         f"negative: {summary['n_negative_gpu_residual']}"
+		         f"/{summary['n_trajectories']} (preserved, not clamped)")
+	if "sampled_vs_counter_ratio_median" in summary:
+		L.append(f"DIAGNOSTIC sampled/counter ratio: "
+		         f"median={summary['sampled_vs_counter_ratio_median']:.3f} "
+		         f"min={summary['sampled_vs_counter_ratio_min']:.3f} "
+		         f"max={summary['sampled_vs_counter_ratio_max']:.3f}  "
+		         f"(integrated ~10Hz power vs cumulative counter)")
 	L.append("")
-	L.append(f"{'question':<22} {'ev':>4} {'wall_s':>8} {'busy_s':>8} "
-	         f"{'gap_s':>7} {'ovl_s':>7} {'gpu_J':>10} {'cov':>7}")
+	L.append(f"{'question':<22} {'ev':>4} {'wall_s':>8} {'sum_ev_J':>10} "
+	         f"{'traj_J':>10} {'resid_J':>9} {'cov':>7} {'sampl_J':>10}")
 	for r in rows[:40]:
 		cov = r.get("coverage_gpu_energy_j")
-		gpu = r.get("sum_attributed_gpu_energy_j")
 		L.append(f"{str(r['question_id']):<22} {r['n_events']:>4} "
-		         f"{_f(r['trajectory_wall_s']):>8} {_f(r['event_busy_s']):>8} "
-		         f"{_f(r['inter_event_gap_s']):>7} {_f(r['overlap_s']):>7} "
-		         f"{_f(gpu):>10} {(f'{cov:.3f}' if cov is not None else '-'):>7}")
+		         f"{_f(r['trajectory_wall_s']):>8} "
+		         f"{_f(r.get('sum_attributed_gpu_energy_j')):>10} "
+		         f"{_f(r.get('trajectory_gpu_energy_j')):>10} "
+		         f"{_f(r.get('unattributed_gpu_energy_j')):>9} "
+		         f"{(f'{cov:.3f}' if cov is not None else '-'):>7} "
+		         f"{_f(r.get('sampled_gpu_energy_estimate_j')):>10}")
 	if len(rows) > 40:
 		L.append(f"... {len(rows) - 40} more trajectories")
 	return "\n".join(L)

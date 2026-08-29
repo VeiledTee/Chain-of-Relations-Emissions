@@ -376,6 +376,154 @@ class TestTrajectoryAccounting(unittest.TestCase):
 		self.assertEqual(trajectory.summarize([])["n_trajectories"], 0)
 
 
+class TestCounterBasedTrajectoryEnergy(unittest.TestCase):
+	"""The trajectory reference must be the cumulative counter, not sampled power."""
+
+	def _power_csv(self, tmpdir, header, rows):
+		path = os.path.join(tmpdir, "power.csv")
+		with open(path, "w") as f:
+			f.write(",".join(header) + "\n")
+			for r in rows:
+				f.write(",".join("" if v is None else str(v) for v in r) + "\n")
+		return path
+
+	def test_load_power_separates_the_three_column_families(self):
+		import tempfile
+		with tempfile.TemporaryDirectory() as d:
+			p = self._power_csv(
+				d,
+				["t", "gpu0_w", "gpu0_energy_mj", "rapl_package-0_intel-rapl:0_uj"],
+				[[0.0, 100.0, 1000, 0], [1.0, 200.0, 2000, 5e6]])
+			ts, gpu_power, rapl, gpu_energy = attribute.load_power(p)
+		self.assertEqual(list(gpu_power), ["gpu0_w"])
+		self.assertEqual(list(gpu_energy), ["gpu0_energy_mj"])
+		self.assertEqual(list(rapl), ["rapl_package-0_intel-rapl:0_uj"])
+		self.assertNotIn("gpu0_energy_mj", gpu_power,
+		                 "counter column must not be treated as watts")
+
+	def test_legacy_power_csv_yields_no_gpu_counter(self):
+		"""A log predating the counter column reports unavailable, not zero."""
+		import tempfile
+		with tempfile.TemporaryDirectory() as d:
+			p = self._power_csv(d, ["t", "gpu0_w"], [[0.0, 50.0], [1.0, 50.0]])
+			ts, gpu_power, rapl, gpu_energy = attribute.load_power(p)
+		self.assertEqual(gpu_energy, {})
+		self.assertEqual(list(gpu_power), ["gpu0_w"])
+
+	def test_counter_delta_converts_millijoules_to_joules(self):
+		ts = [0.0, 1.0, 2.0]
+		vals = [0.0, 1000.0, 3000.0]  # mJ
+		self.assertAlmostEqual(
+			attribute.counter_delta(ts, vals, 0.0, 2.0, 1e3), 3.0)
+
+	def test_counter_delta_interpolates_within_a_sample_interval(self):
+		ts = [0.0, 1.0]
+		vals = [0.0, 1000.0]
+		self.assertAlmostEqual(
+			attribute.counter_delta(ts, vals, 0.0, 0.5, 1e3), 0.5)
+
+	def test_counter_delta_is_none_without_enough_samples(self):
+		self.assertIsNone(attribute.counter_delta([0.0], [1.0], 0.0, 1.0, 1e3))
+		self.assertIsNone(attribute.counter_delta([], [], 0.0, 1.0, 1e3))
+
+	def test_sum_counter_domain_is_none_when_group_empty(self):
+		self.assertIsNone(attribute.sum_counter_domain([0.0, 1.0], {}, 0.0, 1.0, 1e3))
+
+	def test_counter_and_sampled_fields_have_distinct_names(self):
+		"""The diagnostic must never share a name with the reference."""
+		self.assertIn("sampled_gpu_energy_estimate_j", trajectory.DIAGNOSTIC_FIELDS)
+		self.assertIn("gpu_energy_j", trajectory.ENERGY_FIELDS)
+		self.assertNotIn("sampled_gpu_energy_estimate_j", trajectory.ENERGY_FIELDS)
+		for f in trajectory.DIAGNOSTIC_FIELDS:
+			self.assertNotIn(f, trajectory.ENERGY_FIELDS, f)
+
+	def test_coverage_uses_the_counter_not_the_sampled_estimate(self):
+		"""Given both, coverage must divide by the counter."""
+		events = [_event("q1", 0.0, 1.0, gpu=90.0)]
+		window = {
+			"gpu_energy_j": 100.0,               # counter  -> coverage 0.90
+			"sampled_gpu_energy_estimate_j": 50.0,  # sampled -> would give 1.80
+			"cpu_package_energy_j": None, "dram_energy_j": None,
+			"measured_energy_j": None,
+			"gpu_energy_source": "nvml_cumulative_counter",
+		}
+		row, = trajectory.accumulate(events, window_energy=lambda a, b: window)
+		self.assertAlmostEqual(row["coverage_gpu_energy_j"], 0.90)
+		self.assertAlmostEqual(row["trajectory_gpu_energy_j"], 100.0)
+		self.assertAlmostEqual(row["sampled_gpu_energy_estimate_j"], 50.0)
+		self.assertNotAlmostEqual(row["coverage_gpu_energy_j"], 1.80)
+
+	def test_sampled_estimate_is_carried_but_never_becomes_the_reference(self):
+		events = [_event("q1", 0.0, 1.0, gpu=10.0)]
+		window = {
+			"gpu_energy_j": None,                   # counter unavailable
+			"sampled_gpu_energy_estimate_j": 42.0,  # must NOT be substituted
+			"cpu_package_energy_j": None, "dram_energy_j": None,
+			"measured_energy_j": None,
+			"gpu_energy_source": "unavailable",
+		}
+		row, = trajectory.accumulate(events, window_energy=lambda a, b: window)
+		self.assertIsNone(row["trajectory_gpu_energy_j"])
+		self.assertIsNone(row["coverage_gpu_energy_j"])
+		self.assertEqual(row["gpu_energy_source"], "unavailable")
+		self.assertAlmostEqual(row["sampled_gpu_energy_estimate_j"], 42.0)
+
+	def test_sampled_vs_counter_ratio_is_recorded(self):
+		events = [_event("q1", 0.0, 1.0, gpu=50.0)]
+		window = {
+			"gpu_energy_j": 100.0,
+			"sampled_gpu_energy_estimate_j": 80.0,
+			"cpu_package_energy_j": None, "dram_energy_j": None,
+			"measured_energy_j": None,
+			"gpu_energy_source": "nvml_cumulative_counter",
+		}
+		row, = trajectory.accumulate(events, window_energy=lambda a, b: window)
+		self.assertAlmostEqual(row["sampled_vs_counter_ratio"], 0.80)
+
+
+class TestResidualNotClamped(unittest.TestCase):
+
+	def _window(self, counter):
+		return lambda a, b: {
+			"gpu_energy_j": counter,
+			"cpu_package_energy_j": None, "dram_energy_j": None,
+			"measured_energy_j": None,
+			"gpu_energy_source": "nvml_cumulative_counter",
+			"sampled_gpu_energy_estimate_j": None,
+		}
+
+	def test_negative_residual_is_preserved(self):
+		"""Events summing above the window must yield a negative residual."""
+		events = [_event("q1", 0.0, 1.0, gpu=105.0)]
+		row, = trajectory.accumulate(events, window_energy=self._window(100.0))
+		self.assertAlmostEqual(row["unattributed_gpu_energy_j"], -5.0)
+		self.assertLess(row["unattributed_gpu_energy_j"], 0.0)
+		self.assertGreater(row["coverage_gpu_energy_j"], 1.0)
+
+	def test_negative_residual_survives_the_identity(self):
+		events = [_event("q1", 0.0, 1.0, gpu=105.0)]
+		row, = trajectory.accumulate(events, window_energy=self._window(100.0))
+		self.assertAlmostEqual(
+			row["trajectory_gpu_energy_j"] - row["sum_attributed_gpu_energy_j"],
+			row["unattributed_gpu_energy_j"])
+
+	def test_summary_counts_and_reports_negative_residuals(self):
+		events = [_event("q1", 0.0, 1.0, gpu=105.0),
+		          _event("q2", 2.0, 3.0, gpu=80.0)]
+		rows = trajectory.accumulate(events, window_energy=self._window(100.0))
+		summary = trajectory.summarize(rows)
+		self.assertEqual(summary["n_negative_gpu_residual"], 1)
+		self.assertAlmostEqual(summary["gpu_residual_min_j"], -5.0)
+		self.assertAlmostEqual(summary["max_abs_negative_gpu_residual_j"], 5.0)
+
+	def test_zero_negative_residuals_reported_as_zero_not_missing(self):
+		events = [_event("q1", 0.0, 1.0, gpu=80.0)]
+		rows = trajectory.accumulate(events, window_energy=self._window(100.0))
+		summary = trajectory.summarize(rows)
+		self.assertEqual(summary["n_negative_gpu_residual"], 0)
+		self.assertAlmostEqual(summary["max_abs_negative_gpu_residual_j"], 0.0)
+
+
 class TestFrozenSchemaPreserved(unittest.TestCase):
 	"""This slice must not have altered the frozen schema-v1 contract."""
 

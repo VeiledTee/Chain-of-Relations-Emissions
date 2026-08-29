@@ -75,25 +75,47 @@ CARRIED_FIELDS = (
 
 
 def load_power(path):
-	ts, gpu_cols, rapl_cols = [], {}, {}
+	"""Read the hardware timeline.
+
+	Returns (ts, gpu_power_cols, rapl_cols, gpu_energy_cols).
+
+	Three distinct column families, kept separate because they are different
+	instruments and must never be mixed:
+
+	  gpu<i>_w           instantaneous power (W)   -> DIAGNOSTIC
+	  gpu<i>_energy_mj   cumulative energy (mJ)    -> GPU measurement instrument
+	  rapl_<domain>_uj   cumulative energy (uJ)    -> CPU/DRAM instrument
+
+	A power.csv written before the GPU counter column existed simply yields an
+	empty gpu_energy_cols, which is reported as unavailable rather than being
+	silently replaced by integrated power.
+	"""
+	ts, gpu_power_cols, rapl_cols, gpu_energy_cols = [], {}, {}, {}
 	with open(path) as f:
 		r = csv.reader(f)
 		header = next(r)
-		gpu_idx = [(i, h) for i, h in enumerate(header) if h.startswith("gpu")]
+		gpu_pw_idx = [(i, h) for i, h in enumerate(header)
+		              if h.startswith("gpu") and h.endswith("_w")]
+		gpu_en_idx = [(i, h) for i, h in enumerate(header)
+		              if h.startswith("gpu") and h.endswith("_energy_mj")]
 		rapl_idx = [(i, h) for i, h in enumerate(header) if h.startswith("rapl_")]
-		for h in gpu_idx:
-			gpu_cols[h[1]] = []
-		for h in rapl_idx:
-			rapl_cols[h[1]] = []
+		for _, h in gpu_pw_idx:
+			gpu_power_cols[h] = []
+		for _, h in gpu_en_idx:
+			gpu_energy_cols[h] = []
+		for _, h in rapl_idx:
+			rapl_cols[h] = []
 		for row in r:
 			if not row or not row[0]:
 				continue
 			ts.append(float(row[0]))
-			for i, h in gpu_idx:
-				gpu_cols[h].append(float(row[i]) if row[i] else 0.0)
+			for i, h in gpu_pw_idx:
+				gpu_power_cols[h].append(float(row[i]) if row[i] else 0.0)
+			for i, h in gpu_en_idx:
+				gpu_energy_cols[h].append(float(row[i]) if row[i] else None)
 			for i, h in rapl_idx:
 				rapl_cols[h].append(float(row[i]) if row[i] else None)
-	return ts, gpu_cols, rapl_cols
+	return ts, gpu_power_cols, rapl_cols, gpu_energy_cols
 
 
 def classify_rapl(rapl_cols):
@@ -184,6 +206,46 @@ def rapl_delta(ts, uj, t0, t1):
 	if d < 0:
 		d += RAPL_MAX
 	return d / 1e6  # uJ -> J
+
+
+def counter_delta(ts, values, t0, t1, scale):
+	"""Energy (J) from a cumulative counter over [t0, t1].
+
+	`scale` converts the counter's native unit to Joules (1e3 for mJ, 1e6 for
+	uJ). Interpolates linearly between the bracketing samples, which is well
+	behaved for a monotone accumulator at locally-constant power.
+
+	Returns None when fewer than two usable samples exist: an absent counter is
+	missing data, never zero energy.
+	"""
+	pts = [(t, v) for t, v in zip(ts, values) if v is not None]
+	if len(pts) < 2 or t1 <= t0:
+		return None
+	tt = [p[0] for p in pts]
+
+	def value_at(t):
+		i = bisect.bisect_left(tt, t)
+		if i <= 0:
+			return pts[0][1]
+		if i >= len(pts):
+			return pts[-1][1]
+		(ta, va), (tb, vb) = pts[i - 1], pts[i]
+		if tb == ta:
+			return vb
+		return va + (vb - va) * (t - ta) / (tb - ta)
+
+	return (value_at(t1) - value_at(t0)) / scale
+
+
+def sum_counter_domain(ts, cols, t0, t1, scale):
+	"""Total energy (J) across a counter column group, or None if unavailable."""
+	if not cols:
+		return None
+	parts = [counter_delta(ts, values, t0, t1, scale) for values in cols.values()]
+	present = [p for p in parts if p is not None]
+	if not present or len(present) != len(parts):
+		return None if not present else sum(present)
+	return sum(present)
 
 
 def sum_domain(ts, cols, t0, t1):
@@ -300,7 +362,7 @@ def main():
 	out_events = args.out_events or os.path.join(
 		os.path.dirname(os.path.abspath(args.events)), "events_attributed.jsonl")
 
-	ts, gpus, rapls = load_power(args.power)
+	ts, gpus, rapls, gpu_energy_cols = load_power(args.power)
 	events = []
 	for line in open(args.events):
 		line = line.strip()
@@ -351,25 +413,61 @@ def main():
 				           + [_fmt(v, field) for field in fields])
 
 	# --- trajectory accounting ------------------------------------------
-	# The whole-question window energy is derived from the sampled power
-	# timeline, while per-event GPU energy comes from the NVML counter. Those
-	# are two different instruments measuring the same quantity, so the
-	# reconciliation below is a genuine cross-instrument check rather than a
-	# tautology. Where no power samples exist the window energy is unavailable
-	# and coverage is reported as null rather than a circular 1.0.
+	# LIKE-FOR-LIKE INSTRUMENTS. Every trajectory-level energy reference is a
+	# cumulative hardware counter differenced across the window, matching how
+	# per-event energy is produced:
+	#
+	#   GPU          NVML gpu<i>_energy_mj      (same register the event log reads)
+	#   CPU package  RAPL package cumulative uJ
+	#   DRAM         RAPL dram cumulative uJ
+	#
+	# Integrated sampled power is NOT the reconciliation denominator. At ~10 Hz
+	# it resolves fast inference power transients poorly and errs in both
+	# directions, which inflated coverage above 1 on short trajectories. It is
+	# retained only as the separately named diagnostic
+	# sampled_gpu_energy_estimate_j, plus mean/peak power.
+	#
+	# When the GPU counter is absent, gpu_energy_j is reported as None and the
+	# availability is stated explicitly -- never silently back-filled with the
+	# sampled estimate.
 	def window_energy(t0, t1):
 		if t0 is None or t1 is None:
 			return None
-		gpu_w = (sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
-		         if gpus else None)
-		pkg_w = sum_domain(ts, pkg_cols, t0, t1)
-		dram_w = sum_domain(ts, dram_cols, t0, t1)
+		gpu_counter = sum_counter_domain(ts, gpu_energy_cols, t0, t1, 1e3)
+		pkg_c = sum_domain(ts, pkg_cols, t0, t1)
+		dram_c = sum_domain(ts, dram_cols, t0, t1)
+
+		# diagnostics from the sampled power curve
+		sampled = (sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
+		           if gpus else None)
+		mean_w = peak_w = None
+		if gpus:
+			lo = bisect.bisect_left(ts, t0)
+			hi = bisect.bisect_right(ts, t1)
+			window = [sum(vals[k] for vals in gpus.values())
+			          for k in range(lo, max(lo, hi))]
+			if window:
+				mean_w = sum(window) / len(window)
+				peak_w = max(window)
+
 		return {
-			"gpu_energy_j": gpu_w,
-			"cpu_package_energy_j": pkg_w,
-			"dram_energy_j": dram_w,
-			"measured_energy_j": measured_total(gpu_w, pkg_w, dram_w),
+			"gpu_energy_j": gpu_counter,
+			"cpu_package_energy_j": pkg_c,
+			"dram_energy_j": dram_c,
+			"measured_energy_j": measured_total(gpu_counter, pkg_c, dram_c),
+			# --- diagnostics, never the reference ---
+			"gpu_energy_source": ("nvml_cumulative_counter" if gpu_counter is not None
+			                      else "unavailable"),
+			"sampled_gpu_energy_estimate_j": sampled,
+			"mean_gpu_power_w": mean_w,
+			"peak_gpu_power_w": peak_w,
 		}
+
+	if ts and not gpu_energy_cols:
+		print("NOTE: power.csv has no gpu*_energy_mj column -> trajectory GPU "
+		      "energy is UNAVAILABLE (this log predates the cumulative GPU "
+		      "counter). Integrated sampled power is reported only as the "
+		      "diagnostic sampled_gpu_energy_estimate_j and is NOT substituted.")
 
 	traj_rows = trajectory.accumulate(rows, window_energy=window_energy if ts else None)
 	traj_summary = trajectory.summarize(traj_rows)

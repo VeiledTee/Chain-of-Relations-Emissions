@@ -276,11 +276,54 @@ belongs to no named operation. Forcing it into named operations would overstate
 operation-level attribution — precisely the claim C2 is trying to establish
 honestly.
 
-The two quantities come from **different instruments** — per-event GPU energy
-from the NVML counter, whole-window energy from the integrated power curve — so
-this reconciliation is a genuine cross-instrument check rather than a tautology.
-Where no power timeline exists, coverage is reported as `null`, because a
-coverage of exactly 1.0 computed against the event sum itself would be circular.
+### Like-for-like instruments (required)
+
+Both sides of the reconciliation must come from the **same physical
+instrument**, or the residual measures instrument disagreement rather than
+unattributed work. For every domain the trajectory reference is a **cumulative
+hardware counter differenced across the window**:
+
+```
+trajectory_gpu_energy_j          = nvml_cumulative_end - nvml_cumulative_start
+trajectory_cpu_package_energy_j  = rapl_package_end    - rapl_package_start
+trajectory_dram_energy_j         = rapl_dram_end       - rapl_dram_start
+```
+
+which matches how per-event energy is produced. The whole-window figure is
+still derived independently of the event log — the sampler process reads the
+counter, the harness reads it in-band — so the check remains genuine rather
+than circular, while removing the instrument mismatch.
+
+**Integrated sampled power is NOT a reference.** At ~10 Hz it resolves fast
+inference power transients poorly, and the resulting window estimate is
+unreliable in **both directions** — measured `sampled_vs_counter_ratio` on real
+Gemma 3 4B trajectories spans roughly 0.91–1.20, i.e. the estimate errs low on
+some windows and high on others rather than carrying a fixed bias that could be
+corrected. Its error grows as trajectories shorten and sample counts fall,
+which is what previously drove attribution coverage above 1 on short
+trajectories despite zero event overlap. It survives only as the separately
+named diagnostic `sampled_gpu_energy_estimate_j`, alongside `mean_gpu_power_w`
+and `peak_gpu_power_w`, with `sampled_vs_counter_ratio` characterising the
+disagreement.
+
+A domain whose counter is unavailable is reported as unavailable
+(`gpu_energy_source: "unavailable"`, `trajectory_gpu_energy_j: null`,
+coverage `null`). It is **never** back-filled from the sampled estimate.
+
+### Residual sign
+
+```
+unattributed_energy_j = trajectory_energy_j - sum_attributed_j
+```
+
+Small **negative** residuals are expected and are **not clamped to zero**. The
+event log reads the counter in-band at exact event boundaries, while the
+trajectory reference interpolates the sampler's reads to the trajectory edges;
+counter update granularity and boundary timing can place slightly more energy
+inside events than the interpolated window shows. Clamping would conceal the
+very instrument behaviour this reconciliation exists to expose. The summary
+reports `n_negative_gpu_residual`, `gpu_residual_min_j` and
+`max_abs_negative_gpu_residual_j` so the magnitude can be characterised.
 
 ### Overlap rule
 
@@ -467,6 +510,29 @@ Every event carries run-scoped provenance, configured once per run:
 | `model_revision` | `MODEL_REVISION` — **must be set** for a citable run |
 | `git_commit` | auto-detected working-tree revision |
 | `hardware_id` | hostname + NVML GPU model(s) |
+
+### TODO — serving-stack readiness before citable runs
+
+Two settings used during validation on the WSL2 development host are
+**validation-only** and must not be carried into the final experiment manifest:
+
+- [ ] **`FLASHINFER_DISABLE_VERSION_CHECK=1` must be removed.** The development
+      environment currently has mutually incompatible FlashInfer packages
+      (`flashinfer-cubin` 0.6.13 against `flashinfer-python` 0.5.2), and vLLM
+      refuses to start without the bypass. Suppressing a version check is
+      acceptable to prove an integration path; it is **not** acceptable for a
+      citable measurement, because the attention backend actually exercised is
+      then unverified. Final runs must pin **mutually compatible** serving
+      dependencies and start with **no version-check bypass**.
+- [ ] **`--gpu-memory-utilization 0.78` must be re-derived, not copied.** That
+      value is specific to this WSL2/Windows-shared RTX 4090, where roughly
+      3.9 GB of the 24 GB device is held by the Windows host and invisible to
+      WSL, so vLLM's fraction-of-*total* accounting over-commits at the usual
+      0.90. On a dedicated bare-metal node the free/total ratio differs and the
+      value must be recomputed from that host's actual free VRAM.
+
+Both settings must be resolved and the resolution recorded before any run is
+treated as a C2 measurement.
 
 A publishable run additionally requires, recorded alongside the artifacts:
 
