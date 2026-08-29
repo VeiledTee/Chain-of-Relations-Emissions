@@ -30,16 +30,18 @@ declared here only because other paradigms in this repository emit them.
 Taxonomy changes after schema freeze must be deliberate and documented.
 """
 
-from enum import Enum
+from agent_energy_profiler.schema import SCHEMA_VERSION, Status, _Str
 
-SCHEMA_VERSION = 1
+__all__ = [
+	"SCHEMA_VERSION", "Status", "OperationType", "OperationLabel", "Paradigm",
+	"COR_LABELS", "COR_LLM_LABELS", "FALLBACK_NO_GRAPH_ANSWER",
+	"LEGACY_CATEGORY_INFERENCE", "LEGACY_CATEGORY_TOOL",
+	"is_known_label", "is_known_status", "type_of", "legacy_category",
+]
 
-
-class _Str(str, Enum):
-	"""str-valued enum that serializes and compares as its plain value."""
-
-	def __str__(self) -> str:
-		return self.value
+# SCHEMA_VERSION and Status are the generic event schema's, re-exported so
+# there is exactly one definition of each. This module owns only the CoR
+# *semantics*: which operations exist and what they mean.
 
 
 class OperationType(_Str):
@@ -71,13 +73,6 @@ class OperationLabel(_Str):
 	# so non-CoR paradigms keep running unchanged. A formalized CoR run must
 	# never emit it: see tests/test_energy_taxonomy.py.
 	LLM_GENERATE = "llm:generate"
-
-
-class Status(_Str):
-	OK = "ok"
-	ERROR = "error"
-	TIMEOUT = "timeout"
-	CANCELLED = "cancelled"
 
 
 class Paradigm(_Str):

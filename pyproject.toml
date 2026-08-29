@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-energy-profiler"
+version = "0.1.0"
+description = "Hardware-grounded, operation-level energy profiling for agentic systems"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# No required runtime dependencies: the package degrades to reporting a domain
+# as unavailable rather than failing, and never fabricates a measurement.
+dependencies = []
+
+[project.optional-dependencies]
+# NVIDIA GPU energy counters. Without it, GPU energy is reported unavailable.
+gpu = ["pynvml>=11.5"]
+
+[project.scripts]
+aep-sample = "agent_energy_profiler.sampling:main"
+aep-attribute = "agent_energy_profiler.attribution:main"
+aep-validate = "agent_energy_profiler.validation:main"
+
+[tool.setuptools]
+# Only the profiler is packaged. The host agents (chain_of_relations) and the
+# C2 experiment code (measurement/) live in this repository but are NOT part of
+# the distribution: the dependency direction is one-way.
+packages = ["agent_energy_profiler", "agent_energy_profiler.hardware"]

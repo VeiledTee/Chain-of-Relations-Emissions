@@ -662,3 +662,44 @@ Source: `trajectory_summary.csv` joined to answer scoring on `question_id`.
 | `measurement/measure_run.py` | Measured-run orchestrator |
 | `tests/test_energy_measurement.py` | Frozen schema-v1 contract tests |
 | `tests/test_hardware_validation.py` | Capability, classification and accounting tests |
+| `tests/test_package_boundary.py` | One-way dependency rule and profiler public API |
+
+### Where the instrument lives
+
+The measurement instrument is the standalone package `agent_energy_profiler`.
+It knows nothing about CoR, Freebase, KGQA or any benchmark, and the dependency
+direction is one-way and test-enforced:
+
+```
+chain_of_relations / measurement  ->  agent_energy_profiler     allowed
+agent_energy_profiler             ->  chain_of_relations        FORBIDDEN
+```
+
+| Contract | Implementation | Compatibility entry point |
+|---|---|---|
+| Semantic event timeline | `agent_energy_profiler/events.py` | `chain_of_relations/energy_events.py` (CoR adapter) |
+| Hardware timeline | `agent_energy_profiler/sampling.py` | `measurement/power_logger.py` |
+| Attribution | `agent_energy_profiler/attribution.py` | `measurement/attribute.py` |
+| Trajectory accounting | `agent_energy_profiler/trajectory.py` | `measurement/trajectory.py` |
+| Capability probe | `agent_energy_profiler/validation.py` | `measurement/validate_hardware.py` |
+| Counter access | `agent_energy_profiler/hardware/{nvml,rapl,discovery}.py` | — |
+| Joules -> CO2e | `agent_energy_profiler/carbon.py` | — |
+
+Every command line documented in this spec still works: the paths in the table
+above are thin re-export shims, not reimplementations. The move was verified
+behaviour-preserving by re-attributing three existing runs and confirming
+`events_attributed.jsonl`, `energy_summary.csv` and `trajectory_summary.{csv,json}`
+byte-identical before and after.
+
+CoR's *semantics* stay with CoR: the frozen operation taxonomy
+(`chain_of_relations/energy_taxonomy.py`) and the one structural SPARQL
+classifier live in the adapter. The profiler accepts whatever label the caller
+supplies and never infers one from prompt text, function names or the call
+stack.
+
+Carbon conversion is a separate, explicit step. `carbon.py` multiplies measured
+Joules by a grid intensity the **caller supplies**, and records its source,
+region, units, method (average vs marginal) and timestamps. It performs no
+lookup and has no default factor: without a supplied intensity there is no CO2e
+figure. Joules remain the measured product; CO2e is a derived claim about a
+grid, and is only as defensible as the factor behind it.
