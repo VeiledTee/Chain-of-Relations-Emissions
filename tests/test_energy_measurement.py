@@ -532,7 +532,7 @@ class TestContextPropagation(EventsHarness):
 		                 "iteration must keep advancing outside the DFS")
 
 	def test_backtracking_depth_falls_while_iteration_keeps_rising(self):
-		"""The C2-critical distinction, on the required sequence.
+		"""The critical distinction, on the required sequence.
 
 		A DFS that descends to depth 2, backtracks to 1, then descends again
 		produces depths [0, 1, 2, 1, 2] while iterations run [0, 1, 2, 3, 4].

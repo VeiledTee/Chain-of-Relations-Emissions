@@ -9,7 +9,7 @@ Outputs:
                            energy fields, the list of domains actually
                            measured (available_energy_domains) and whether
                            the boundary is complete (measurement_complete).
-                           This is the canonical per-event artifact for C2.
+                           This is the canonical per-event research artifact.
   energy_summary.csv       derived aggregate (by operation_label, by
                            operation_type, by question).
 
@@ -21,7 +21,7 @@ Method:
   RAPL: cumulative counters -> energy delta over the window, interpolated
         between samples; handles counter wraparound.
 
-Energy accounting boundary (thesis definition):
+Energy accounting boundary:
 
     measured_energy_j = gpu_energy_j + cpu_package_energy_j + dram_energy_j
 

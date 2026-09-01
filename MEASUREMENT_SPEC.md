@@ -1,6 +1,6 @@
-# C2 Measurement Specification
+# Measurement Specification
 
-**Status:** measurement protocol contract for Contribution 2.
+**Status:** measurement protocol contract for this study.
 **Schema:** event schema v1 (frozen — see §4).
 **Scope:** Chain-of-Relations (CoR) over Freebase. ToG, PoG and SubgraphRAG are
 out of scope for this document.
@@ -13,7 +13,7 @@ validated limits are. It contains no experimental conclusions.
 
 ## 1. Measurement objective
 
-C2 asks:
+This study asks:
 
 > When inference is embedded in a multi-step agentic loop over a knowledge
 > graph, where is energy actually spent?
@@ -217,7 +217,7 @@ Four layers, deliberately not collapsed:
 |---|---|---|
 | `events.jsonl` | `chain_of_relations/energy_events.py` | Semantic event timeline; GPU counter delta where available |
 | `power.csv` | `measurement/power_logger.py` | Hardware timeline: GPU watts + cumulative RAPL counters, ~10 Hz |
-| `events_attributed.jsonl` | `measurement/attribute.py` | Every raw event, unchanged, plus attributed energy fields. **Canonical per-event artifact for C2.** |
+| `events_attributed.jsonl` | `measurement/attribute.py` | Every raw event, unchanged, plus attributed energy fields. **Canonical per-event artifact for this study.** |
 | `energy_summary.csv` | `measurement/attribute.py` | Derived aggregate by operation label / type / question |
 | `trajectory_summary.csv` / `.json` | `measurement/trajectory.py` | Per-question trajectory accounting (§9) |
 | `codecarbon/emissions.csv` | CodeCarbon | Whole-run CO2e only (§13) |
@@ -273,8 +273,8 @@ attribution_coverage   =  sum_attributed_j / trajectory_energy_j
 visible: Python orchestration, inter-event gaps, model-server idle draw and
 background services all consume energy inside the trajectory window that
 belongs to no named operation. Forcing it into named operations would overstate
-operation-level attribution — precisely the claim C2 is trying to establish
-honestly.
+operation-level attribution — precisely the claim this study is trying to
+establish honestly.
 
 ### Like-for-like instruments (required)
 
@@ -471,7 +471,7 @@ limitation rather than substituted with a correlated source.
 
 ### Host capability requirement
 
-The C2 experimental host is specified by **capability, not by vendor, model or
+The experimental host is specified by **capability, not by vendor, model or
 product line**. A host is eligible only if it:
 
 1. exposes a **readable CPU-package energy domain**;
@@ -532,7 +532,7 @@ Two settings used during validation on the WSL2 development host are
       value must be recomputed from that host's actual free VRAM.
 
 Both settings must be resolved and the resolution recorded before any run is
-treated as a C2 measurement.
+treated as a measurement.
 
 A publishable run additionally requires, recorded alongside the artifacts:
 
@@ -604,11 +604,11 @@ against itself and must not be presented as validation.
 
 ---
 
-## 15. RQ2 analysis contract
+## 15. Analysis contract
 
 Which fields and aggregations support the planned analyses. No conclusions here.
 
-### RQ2a — operation-level and per-iteration/depth decomposition
+### Operation-level decomposition — per operation, iteration and depth
 
 Source: `events_attributed.jsonl`.
 
@@ -632,7 +632,7 @@ Source: `events_attributed.jsonl`.
   `attribution_coverage` from `trajectory_summary`, so the share of trajectory
   energy the decomposition actually explains is always visible.
 
-### RQ2b — question-paired paradigm comparison on an F1–energy frontier
+### Cross-paradigm energy–effectiveness comparison — question-paired, on an F1–energy frontier
 
 Source: `trajectory_summary.csv` joined to answer scoring on `question_id`.
 

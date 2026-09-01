@@ -1,4 +1,4 @@
-"""Analyze one measured run's events.jsonl into the figures/tables C2 needs.
+"""Analyze one measured run's events.jsonl into the figures/tables the study needs.
 
 Reads events.jsonl directly (richer than energy_summary.csv: keeps per-event
 meta and per-question structure). Produces, for a run directory:
@@ -8,7 +8,7 @@ meta and per-question structure). Produces, for a run directory:
   3. per-label breakdown                   (energy, count, mean per call)
   4. token vs energy relationship          (prefill-dominated check)
   5. cost variance across questions        (the fanout story)
-  6. a plaintext tables.txt for the thesis + PNGs
+  6. a plaintext tables.txt for write-up + PNGs
 
 Usage:
   python measurement/analyze.py measurement/runs/smoke_cor_webqsp

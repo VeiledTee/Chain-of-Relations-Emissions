@@ -1,6 +1,6 @@
-"""Trajectory-level energy accounting for C2.
+"""Trajectory-level energy accounting.
 
-The C2 claim is not merely that hardware energy can be measured, but that it
+The claim is not merely that hardware energy can be measured, but that it
 can be *attributed to operations inside an agent trajectory*. That requires
 reconciling two independently-derived quantities per question:
 

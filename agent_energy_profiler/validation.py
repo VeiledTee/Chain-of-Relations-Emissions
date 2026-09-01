@@ -1,6 +1,6 @@
-"""Hardware capability probe for the C2 measurement instrument.
+"""Hardware capability probe for the measurement instrument.
 
-Answers one question: which parts of the C2 measurement boundary can this
+Answers one question: which parts of the measurement boundary can this
 host actually measure?
 
     measured_energy_j = gpu_energy_j + cpu_package_energy_j + dram_energy_j
@@ -356,8 +356,12 @@ def build_report(settle=0.5, resolution_samples=3000):
 	              if nvml.get("cumulative_energy_status") == SUPPORTED
 	              else {"status": UNAVAILABLE, "detail": "no GPU energy counter"})
 
+	# Legacy identifier: reports generated before the project framing was made
+	# standalone carry "c2-hardware-report/1". Same format, same version --
+	# only the name changed. Historical report artifacts are left untouched, so
+	# a consumer reading old and new reports together should accept both.
 	return {
-		"schema": "c2-hardware-report/1",
+		"schema": "hardware-report/1",
 		"generated_at": time.time(),
 		"host": host,
 		"gpu": nvml,
@@ -403,7 +407,7 @@ def render(report):
 	L = []
 	host = report["host"]
 	L.append("=" * 72)
-	L.append("C2 MEASUREMENT HARDWARE CAPABILITY REPORT")
+	L.append("MEASUREMENT HARDWARE CAPABILITY REPORT")
 	L.append("=" * 72)
 	L.append(f"host          {host['hostname']}  ({host['system']} {host['release']})")
 	L.append(f"environment   {host['environment']}"

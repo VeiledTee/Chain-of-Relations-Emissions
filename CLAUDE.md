@@ -6,7 +6,7 @@ Repository: `Chain-of-Relations-Emissions`
 Local path: `/home/penguins/Chain-of-Relations-Emissions`  
 WSL path from Windows: `\\wsl.localhost\Ubuntu\home\penguins\Chain-of-Relations-Emissions`
 
-This repository is an energy-instrumented fork of Chain-of-Relations (CoR) for a PhD project on hardware-grounded energy measurement of agentic KGQA.
+This repository is an energy-instrumented fork of Chain-of-Relations (CoR) for a study on hardware-grounded energy measurement of agentic KGQA.
 
 The immediate task is **only to formalize the CoR measurement layer**. Do not modify ToG, PoG, SubgraphRAG, or unrelated experiment logic in this slice.
 
@@ -14,7 +14,7 @@ The immediate task is **only to formalize the CoR measurement layer**. Do not mo
 
 ## Research context
 
-Contribution 2 of the thesis asks:
+This study asks:
 
 > When inference is embedded in a multi-step agentic loop over a knowledge graph, where is energy actually spent?
 
@@ -59,7 +59,7 @@ The desired separation is:
 1. `events.jsonl` = semantic event timeline
 2. sampled/counter hardware data = hardware timeline
 3. attribution step = joins hardware measurements to events
-4. attributed per-event artifact = canonical input for C2 analysis
+4. attributed per-event artifact = canonical input for analysis
 5. aggregate summaries = derived artifacts
 
 Do not collapse these layers into a single logger.
@@ -98,7 +98,7 @@ Do not:
 - optimize prompts;
 - change benchmark semantics;
 - change answer scoring;
-- implement C3 interventions;
+- implement follow-on intervention work;
 - add experimental results;
 - perform a broad refactor unrelated to measurement;
 - commit or push unless explicitly asked.
@@ -301,7 +301,7 @@ Instrumentation must remain best-effort and must not crash the benchmark workloa
 
 ## Energy accounting rule
 
-For the thesis measurement boundary, the non-overlapping total is:
+For the measurement boundary, the non-overlapping total is:
 
 ```text
 measured_energy_j =
@@ -479,7 +479,7 @@ The exact labels depend on what inspection of the CoR code proves exists.
 
 ## Research-integrity constraints
 
-This instrumentation will support thesis results. Favor correctness and traceability over cleverness.
+This instrumentation will support published results. Favor correctness and traceability over cleverness.
 
 Never:
 

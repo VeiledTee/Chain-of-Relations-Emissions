@@ -1,5 +1,28 @@
 # Emissions Measurement
 
+> ## ⚠️ SUPERSEDED — historical document
+>
+> **This document predates schema v1 and is retained for history only. Do not
+> use it as the current description of the measurement layer.**
+>
+> The authoritative measurement protocol is
+> **[MEASUREMENT_SPEC.md](MEASUREMENT_SPEC.md)**; the instrument itself is
+> the `agent_energy_profiler` package.
+>
+> Known contradictions with current behaviour, left uncorrected below:
+>
+> * it describes a two-field `category` / `label` model — schema v1 uses
+>   `operation_type` and `operation_label`;
+> * it lists `llm:generate` as the only LLM label — schema v1 has
+>   `llm:relation_rank`, `llm:reason`, `llm:answer_filter` and
+>   `llm:direct_answer`, and `llm:generate` is legacy;
+> * it states that SPARQL labels are **inferred from query text** — schema v1
+>   forbids inferring a semantic label from text; the caller supplies it;
+> * it names `chain_of_relations/energy_events.py`, `measurement/power_logger.py`
+>   and `measurement/attribute.py` as the implementation — these are now thin
+>   compatibility shims over `agent_energy_profiler`.
+
+
 ---
 
 This extention of CoR measures the energy of an agentic KGQA system (CoR / ToG / PoG over Freebase) decomposed into **inference** (LLM generation) vs **tool** (KG retrieval + embedding) work, per step and per question. It combines three instruments: (1) an **in-band event log** that timestamps every LLM call, SPARQL query, and embedding encode and reads the GPU's cumulative energy counter at each event's boundaries; (2) an **out-of-band whole-machine power sampler** (NVML GPU power + RAPL CPU/DRAM energy at 10 Hz); (3) **CodeCarbon** for the whole-run energy→carbon (gCO₂e) conversion **only** — a derived environmental metric, *not* an independent validation of the counters, since it reads the same NVML and RAPL sources. Per-step energy is attributed offline by joining the event log to the hardware counters on a shared wall clock. All measurement is **whole-machine** and assumes an otherwise-idle, single-user host running one request at a time.
@@ -41,7 +64,7 @@ A separate host process sampling the **whole machine** at 10 Hz into `power.csv`
 ### Instrument 3 — CodeCarbon (`measurement/measure_run.py`)
 Wraps the *entire* run (`tracker.start()` before the harness, `tracker.stop()` after). Samples every 5 s and emits **one whole-run figure**: kWh and gCO₂e, using NVML for GPU, RAPL-or-TDP-estimate for CPU, a heuristic for RAM, and a grid carbon-intensity factor (set via `country_iso_code`, default `CAN`). It is **not** in the per-step path. Its role is **solely** the energy→carbon conversion the raw counters don't provide.
 
-It is **not** an independent cross-check and must never be cited as one. CodeCarbon reads NVML for the GPU and RAPL-or-a-TDP-estimate for the CPU — the *same* mechanisms this repository already reads directly, plus an estimate where RAPL is absent. Reconciling our counter sums against CodeCarbon compares an instrument against itself. Genuine independent validation requires a separate power source (BMC/IPMI/Redfish or an external meter); see `C2_MEASUREMENT_SPEC.md` §11. CodeCarbon knows nothing about steps or the inference/tool split.
+It is **not** an independent cross-check and must never be cited as one. CodeCarbon reads NVML for the GPU and RAPL-or-a-TDP-estimate for the CPU — the *same* mechanisms this repository already reads directly, plus an estimate where RAPL is absent. Reconciling our counter sums against CodeCarbon compares an instrument against itself. Genuine independent validation requires a separate power source (BMC/IPMI/Redfish or an external meter); see `MEASUREMENT_SPEC.md` §11. CodeCarbon knows nothing about steps or the inference/tool split.
 
 ### Attribution (`measurement/attribute.py`) — offline join
 After the run, joins `events.jsonl` to `power.csv` on wall-clock time:

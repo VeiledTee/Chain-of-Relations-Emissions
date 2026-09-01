@@ -1,4 +1,4 @@
-"""Tests for the C2 hardware-validation layer and trajectory accounting.
+"""Tests for the hardware-validation layer and trajectory accounting.
 
 Kept separate from tests/test_energy_measurement.py so the frozen schema-v1
 tests stay untouched. Pure unit tests: no GPU, no RAPL, no endpoints.

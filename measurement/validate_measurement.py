@@ -1,4 +1,4 @@
-"""Controlled validation workloads for the C2 measurement instrument.
+"""Controlled validation workloads for the measurement instrument.
 
 These are VALIDATION workloads, not benchmark experiments. Each mode answers a
 specific question about whether the instrument measures what it claims to.
@@ -431,7 +431,7 @@ def main():
 	counters = DomainCounters()
 	available = counters.available_domains()
 	print("=" * 72)
-	print(f"C2 MEASUREMENT VALIDATION -- mode={args.mode}")
+	print(f"MEASUREMENT VALIDATION -- mode={args.mode}")
 	print("=" * 72)
 	print(f"available energy domains: {available or 'NONE'}")
 	missing = [d for d in ("gpu", "cpu_package", "dram") if d not in available]
