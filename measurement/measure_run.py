@@ -26,6 +26,66 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+#: Artifacts whose presence proves a measured run already used this directory.
+#: Reusing such a directory silently corrupts the measurement: the event writer
+#: APPENDS to events.jsonl while the power logger OVERWRITES power.csv, so the
+#: older events survive with no hardware timeline covering them and reconcile
+#: to zero trajectory energy.
+RUN_ARTIFACTS = (
+	"events.jsonl",
+	"power.csv",
+	"events_attributed.jsonl",
+	"energy_summary.csv",
+	"trajectory_summary.csv",
+	"trajectory_summary.json",
+	"run.log",
+)
+
+
+def existing_artifacts(outdir):
+	"""Artifact filenames already present in outdir, in RUN_ARTIFACTS order.
+
+	An empty directory (or one holding only empty subdirectories, such as a
+	pre-created codecarbon/) yields an empty list and is safe to reuse: there
+	is no prior measurement to contaminate.
+	"""
+	if not os.path.isdir(outdir):
+		return []
+	return [n for n in RUN_ARTIFACTS if os.path.exists(os.path.join(outdir, n))]
+
+
+def refuse_tag_reuse(outdir, tag):
+	"""Exit non-zero if outdir already holds a measured run.
+
+	There is deliberately no --resume. Resuming a measured run would require
+	appending to the hardware timeline with explicit gap handling, a run_id
+	stable across invocations, and trajectory accounting over several disjoint
+	measurement windows. None of those exist, so a partial run cannot be
+	continued without contaminating the measurement: start a new tag.
+
+	Note this is unrelated to CoR's own id-based resume, which skips questions
+	already present in results/.../predict.jsonl. That still works, and pairs
+	correctly with a FRESH measurement tag.
+	"""
+	found = existing_artifacts(outdir)
+	if not found:
+		return
+	print("ERROR: refusing to reuse an existing measured-run directory.",
+	      file=sys.stderr)
+	print(f"  tag       : {tag}", file=sys.stderr)
+	print(f"  directory : {outdir}", file=sys.stderr)
+	print(f"  artifacts : {', '.join(found)}", file=sys.stderr)
+	print("", file=sys.stderr)
+	print("Reusing a tag appends new events to the old events.jsonl while",
+	      file=sys.stderr)
+	print("overwriting power.csv, leaving the earlier events with no hardware",
+	      file=sys.stderr)
+	print("timeline. Measured runs cannot be resumed; choose a fresh --tag",
+	      file=sys.stderr)
+	print("(or move/delete the existing directory if it is not needed).",
+	      file=sys.stderr)
+	sys.exit(2)
+
 
 def main():
 	ap = argparse.ArgumentParser()
@@ -37,6 +97,7 @@ def main():
 	run_args = [a for a in args.run_args if a != "--"]
 
 	outdir = os.path.join(HERE, "runs", args.tag)
+	refuse_tag_reuse(outdir, args.tag)
 	os.makedirs(outdir, exist_ok=True)
 	events_f = os.path.join(outdir, "events.jsonl")
 	power_f = os.path.join(outdir, "power.csv")
@@ -87,12 +148,22 @@ def main():
 	logger.wait(timeout=10)
 
 	print(f"run exit={rc}, wall={wall:.0f}s; attributing...")
-	subprocess.call(
+	arc = subprocess.call(
 		[sys.executable, os.path.join(HERE, "attribute.py"),
 		 "--events", events_f, "--power", power_f,
 		 "--out", os.path.join(outdir, "energy_summary.csv"),
 		 "--out-events", attributed_f])
 	print(f"artifacts: {outdir}")
+	if arc != 0:
+		# Attribution rejected the run (e.g. events outside hardware coverage).
+		# Fail the pipeline rather than leaving artifacts that look complete.
+		print(f"ERROR: attribution failed (exit {arc}); this run is NOT a valid "
+		      f"measurement.", file=sys.stderr)
+		sys.exit(arc)
+	if rc != 0:
+		print(f"WARNING: the measured workload itself exited {rc}.",
+		      file=sys.stderr)
+		sys.exit(rc)
 
 
 if __name__ == "__main__":

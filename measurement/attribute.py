@@ -32,4 +32,6 @@ from agent_energy_profiler.attribution import (  # noqa: E402,F401
 )
 
 if __name__ == "__main__":
-	main()
+	# Propagate the exit code: attribution returns non-zero when the run fails
+	# an integrity gate (e.g. events outside hardware measurement coverage).
+	sys.exit(main() or 0)

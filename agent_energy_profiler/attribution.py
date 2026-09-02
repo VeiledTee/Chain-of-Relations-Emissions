@@ -50,6 +50,7 @@ import bisect
 import csv
 import json
 import os
+import sys
 from collections import defaultdict
 
 from . import trajectory
@@ -269,6 +270,86 @@ def measured_total(gpu_j, cpu_package_j, dram_j):
 	return sum(parts)
 
 
+def coverage_window(ts):
+	"""(first, last) sample timestamp of the hardware timeline, or None.
+
+	This is the interval during which hardware was actually being sampled. It
+	is a property of the TIMELINE, not of which energy domains that timeline
+	happened to contain: a GPU-only power.csv on a host with no RAPL still
+	defines a perfectly good window.
+	"""
+	if not ts:
+		return None
+	return (ts[0], ts[-1])
+
+
+def uncovered_events(events, ts):
+	"""Events whose [start, end] is not fully inside the hardware timeline.
+
+	Returns (uncovered, considered). An event is uncovered when the sampler was
+	not running for all of it -- it started before the first sample, ended
+	after the last, or straddles either edge. No hardware measurement exists
+	for such an event, so its energy cannot be attributed and must not be
+	invented, zeroed, or folded into a trajectory total.
+
+	This is deliberately NOT about domain availability. Missing CPU-package or
+	DRAM counters leave those fields null and measurement_complete false; they
+	do not make an event uncovered. Events without usable timestamps are not
+	considered, matching attribute_events, which skips them.
+	"""
+	window = coverage_window(ts)
+	uncovered, considered = [], 0
+	for e in events:
+		t0 = e.get("start_timestamp", e.get("t_start"))
+		t1 = e.get("end_timestamp", e.get("t_end"))
+		if t0 is None or t1 is None:
+			continue
+		considered += 1
+		if window is None or t0 < window[0] or t1 > window[1]:
+			uncovered.append(e)
+	return uncovered, considered
+
+
+def render_coverage_failure(uncovered, considered, ts):
+	"""Operator-facing explanation of a coverage failure."""
+	pct = (100.0 * len(uncovered) / considered) if considered else 100.0
+	window = coverage_window(ts)
+	lines = [
+		"ERROR: %d events (%.1f%%) fall outside hardware measurement coverage"
+		% (len(uncovered), pct),
+	]
+	if window is None:
+		lines.append("  hardware timeline: EMPTY - the sampler produced no "
+		             "samples at all")
+	else:
+		lines.append("  hardware timeline : %.3f -> %.3f  (%.1f s, %d samples)"
+		             % (window[0], window[1], window[1] - window[0], len(ts)))
+		ev_t0 = min((e.get("start_timestamp", e.get("t_start")))
+		            for e in uncovered)
+		ev_t1 = max((e.get("end_timestamp", e.get("t_end")))
+		            for e in uncovered)
+		lines.append("  uncovered events  : %.3f -> %.3f" % (ev_t0, ev_t1))
+		before = sum(1 for e in uncovered
+		             if e.get("start_timestamp", e.get("t_start")) < window[0])
+		after = sum(1 for e in uncovered
+		            if e.get("end_timestamp", e.get("t_end")) > window[1])
+		lines.append("  %d start before the timeline, %d end after it"
+		             % (before, after))
+	runs = sorted({str(e.get("run_id")) for e in uncovered})
+	if runs:
+		lines.append("  run_id(s) affected: %s" % ", ".join(runs[:5]))
+	lines += [
+		"",
+		"  No energy is fabricated for these events and trajectory coverage is",
+		"  not forced to 1.0, so this run is not a valid measurement.",
+		"  Common causes: a reused run tag mixing two runs, the sampler",
+		"  starting late or exiting early, or a truncated power log.",
+		"  Re-run with a fresh --tag. There is no override: the measured-run",
+		"  path will not attribute a run it cannot cover.",
+	]
+	return "\n".join(lines)
+
+
 def attribute_events(events, ts, gpus, rapls):
 	pkg_cols, core_cols, dram_cols = classify_rapl(rapls)
 	gpu_src = {"counter": 0, "integrated": 0}
@@ -370,6 +451,17 @@ def main():
 			events.append(json.loads(line))
 		except json.JSONDecodeError:
 			pass  # torn line from a crash; skip, don't die
+
+	# Integrity gate: every event must lie inside the window during which
+	# hardware was actually sampled. Checked BEFORE attribution so a broken
+	# run cannot leave behind artifacts that look complete.
+	# The failure is unconditional: there is no override. An event outside the
+	# hardware timeline means the run is not a measurement, and the pipeline
+	# must stop before any attributed or summary artifact is written.
+	uncovered, considered = uncovered_events(events, ts)
+	if uncovered:
+		print(render_coverage_failure(uncovered, considered, ts), file=sys.stderr)
+		return 1
 
 	rows, gpu_src = attribute_events(events, ts, gpus, rapls)
 
@@ -494,7 +586,8 @@ def main():
 
 	print()
 	print(trajectory.render(traj_rows, traj_summary))
+	return 0
 
 
 if __name__ == "__main__":
-	main()
+	sys.exit(main() or 0)
