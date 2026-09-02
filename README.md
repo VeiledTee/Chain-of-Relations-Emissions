@@ -136,11 +136,12 @@ share, residual or total it cannot defend from the layers below.
   orchestration and background energy stay explicit.
 - **Overlap is checked**, not assumed away: overlapping spans within a
   trajectory invalidate the accounting.
-- **Short operations may fall below counter resolution.** The development
-  host's NVML energy counter updates at ≈100 ms; per-event GPU energy for
-  operations substantially shorter than that is biased low rather than
-  symmetrically noisy. CPU-package and DRAM temporal resolution has **not**
-  been characterised, because those domains are unavailable on that host.
+- **Short operations may fall below counter resolution.** On the development
+  host (RTX 4090) the NVML energy counter updates every **106 ms**, measured by
+  `validate_hardware.py`; per-event GPU energy for operations substantially
+  shorter than that is biased low rather than symmetrically noisy. CPU-package
+  and DRAM temporal resolution has **not** been characterised, because those
+  domains are unavailable on that host.
 - **Development-host runs are validation-only.** The WSL2 development machine
   exposes no RAPL, so `measured_energy_j` is always `null` there.
 

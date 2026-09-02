@@ -15,7 +15,11 @@ dependencies = []
 
 [project.optional-dependencies]
 # NVIDIA GPU energy counters. Without it, GPU energy is reported unavailable.
-gpu = ["pynvml>=11.5"]
+# nvidia-ml-py is NVIDIA's official binding and provides the `pynvml` module
+# imported by agent_energy_profiler/hardware/nvml.py. The separately published
+# `pynvml` distribution wraps it and emits a FutureWarning on import; do not
+# install both, since they claim the same module name.
+gpu = ["nvidia-ml-py>=12.535"]
 
 [project.scripts]
 aep-sample = "agent_energy_profiler.sampling:main"

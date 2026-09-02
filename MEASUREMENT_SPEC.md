@@ -368,9 +368,16 @@ be investigated, not corrected away.
 
 **Scope of this finding.** What follows concerns the **NVML GPU energy counter
 only**. It establishes that **per-event GPU energy for operations substantially
-shorter than the NVML update interval (~100 ms on the host measured to date) is
-not reliably resolvable**. It says nothing about the CPU-package or DRAM
-domains.
+shorter than the NVML update interval is not reliably resolvable**. On the only
+host measured to date (RTX 4090, driver 591.86) that interval is **106 ms**
+— median 106.1–107.1 ms across six `validate_hardware.py` runs, ~80 counter
+updates observed per run. This says nothing about the CPU-package or DRAM
+domains, and the interval must be re-measured on every host.
+
+The median update **step** on that host was 138–158 mJ across the same runs.
+The step is not a hardware constant: it is instantaneous power multiplied by
+the update interval, so it moves with load. Only the interval bounds which
+operations the counter can resolve.
 
 The NVML cumulative energy counter does not update continuously. Its update
 interval must be measured per host (`validate_hardware.py` reports it) because

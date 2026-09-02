@@ -183,16 +183,26 @@ characterisations, **not** experimental results:
   sustained load vs 29.5 W idle).
 - ✅ Sustained GPU measurements are repeatable — **CV ≈ 1.7%** over 12 identical
   3 s workloads.
-- ⚠️ The RTX 4090 NVML energy counter has an **≈100 ms update interval**.
-  **Per-event GPU energy for operations substantially shorter than that is not
-  reliably resolved**, and is biased low rather than symmetrically noisy.
+- ⚠️ The RTX 4090 NVML energy counter has a **median update interval of
+  106 ms** (106.1–107.1 ms across six `validate_hardware.py` runs, ~80 counter
+  updates observed per run). The median update **step** was 138–158 mJ across
+  the same runs; the step is not a hardware constant, since it is the product
+  of instantaneous power and the interval, and so tracks idle-power
+  fluctuation. **Per-event GPU energy for operations substantially shorter than
+  the interval is not reliably resolved**, and is biased low rather than
+  symmetrically noisy.
+  - Observed directly in `validate_measurement.py --mode cpu`: five fixed
+    SPARQL queries of 4.0–11.5 ms returned `gpu = 2.388, 0, 0, 0, 0 J`. Four
+    windows closed inside one counter interval and differenced to zero; one
+    straddled an update and absorbed a whole step. The resulting `CV 2.24` on
+    `gpu_energy_j` is quantization, not physical variance.
 - ✅ Freebase is functional (3.12B triples).
 - ❌ **CPU-package and DRAM counters are unavailable under WSL2** — no
   `/sys/class/powercap`, no MSR interface.
 - ❌ Therefore **`measurement_complete` cannot become true on this host**, and
   `measured_energy_j` is always `null` here.
 
-> **Scope of the ≈100 ms result.** It applies to the **GPU / NVML counter
+> **Scope of the 106 ms result.** It applies to the **GPU / NVML counter
 > only**. The temporal resolution of the **CPU-package and DRAM** counters has
 > **not** been measured, because those domains are unavailable on this host.
 > RAPL is a separate mechanism with its own update characteristics. Since KG
