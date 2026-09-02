@@ -9,6 +9,7 @@ papers/
 results/
 results_archived/
 measurement/runs/
+measurement/hardware_report.json
 scripts/run.sh
 
 # Byte-compiled / optimized / DLL files

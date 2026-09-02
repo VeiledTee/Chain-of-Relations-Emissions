@@ -477,6 +477,29 @@ The exact labels depend on what inspection of the CoR code proves exists.
 
 ---
 
+## Commit authorship
+
+**Never add Claude, any AI assistant, or any tool as a Git author or co-author.**
+Do not add `Co-Authored-By`, `Claude-Session`, or equivalent AI attribution
+trailers to commit messages. Commits must use only the configured human Git
+author.
+
+Claude Code is a development tool used to produce the work, in the same way an
+editor or a compiler is. Tools are not authors and must not appear in
+authorship metadata.
+
+This is enforced in two places, both of which should stay in place:
+
+- `.claude/settings.json` sets `includeCoAuthoredBy: false` for this
+  repository;
+- `scripts/git-hooks/commit-msg` rejects any commit message carrying an AI
+  attribution trailer. Enable it once per clone with
+  `git config core.hooksPath scripts/git-hooks`.
+
+Do not alter the configured human `user.name` or `user.email`.
+
+---
+
 ## Research-integrity constraints
 
 This instrumentation will support published results. Favor correctness and traceability over cleverness.

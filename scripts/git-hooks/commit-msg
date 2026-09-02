@@ -1,0 +1,38 @@
+#!/bin/sh
+# Reject AI attribution trailers in commit messages.
+#
+# Claude Code and similar tools are development tools, not authors. Commits
+# must carry only the configured human Git author.
+#
+# Enable (once per clone):
+#     git config core.hooksPath scripts/git-hooks
+#
+# Bypass for a single commit, if ever genuinely needed:
+#     git commit --no-verify
+#
+# POSIX sh + grep only; no dependencies.
+
+msg_file="$1"
+
+# Ignore comment lines so `git commit -v` diffs and templates cannot trip it.
+body=$(grep -v '^#' "$msg_file")
+
+pattern='^[[:space:]]*(Co-Authored-By|Co-Committed-By|Signed-Off-By|Generated-With|Claude-Session|Assisted-By)[[:space:]]*:.*(Claude|Anthropic|Copilot|ChatGPT|OpenAI|Cursor|Gemini|AI-Assistant)'
+
+if printf '%s\n' "$body" | grep -qiE "$pattern"; then
+	echo "commit-msg: refusing AI attribution trailer." >&2
+	echo >&2
+	printf '%s\n' "$body" | grep -inE "$pattern" | sed 's/^/  line /' >&2
+	echo >&2
+	echo "  Tools are not authors. Remove the trailer and commit again." >&2
+	echo "  See CLAUDE.md, 'Commit authorship'." >&2
+	exit 1
+fi
+
+# Also catch a bare session-URL trailer with no vendor keyword on the line.
+if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Claude-Session[[:space:]]*:'; then
+	echo "commit-msg: refusing Claude-Session trailer." >&2
+	exit 1
+fi
+
+exit 0
