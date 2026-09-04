@@ -21,6 +21,9 @@ import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 
+from chain_of_relations import energy_events
+from chain_of_relations import energy_taxonomy
+from chain_of_relations.energy_taxonomy import OperationLabel
 from chain_of_relations.llm_api import LLMAPI
 from chain_of_relations.kg_backend import KGBackend, get_default_backend
 from chain_of_relations.schema import Entity, Relation
@@ -142,6 +145,37 @@ class PoGAgent:
 			max_tokens=max_tokens,
 			system_prompt=system_prompt,
 		)
+
+	def _llm_generate_for(self, operation_label, **extra_meta):
+		"""An llm_generate bound to one semantic PoG stage.
+
+		Same pattern as CoRAgent._llm_generate_for and ToGAgent: the shared
+		tools are used by all three paradigms and must not learn about the
+		taxonomy, so this agent -- the caller that knows *why* the model is
+		being invoked -- binds the label here and the tool calls it unchanged.
+		Never inferred from prompt text.
+
+		Retry accounting keeps the two levels distinct: meta.attempts counts
+		retries inside one LLMAPI.generate call (one event); meta.tool_attempt
+		counts calls made by the tool's own loop (one event each). Where a tool
+		calls the model once per candidate group, the tool attaches the
+		group_index itself.
+		"""
+		state = {"tool_attempt": 0}
+
+		def generate(user_prompt, temperature, max_tokens, system_prompt=None):
+			state["tool_attempt"] += 1
+			with energy_events.operation(operation_label), \
+			     energy_events.event_meta(tool_attempt=state["tool_attempt"],
+			                              **extra_meta):
+				return self._llm_generate(
+					user_prompt=user_prompt,
+					temperature=temperature,
+					max_tokens=max_tokens,
+					system_prompt=system_prompt,
+				)
+
+		return generate
 
 	@staticmethod
 	def _normalize_topic_entities(topic_entities: List[Any]) -> List[Entity]:
@@ -343,7 +377,19 @@ class PoGAgent:
 							return str(rel_id), head
 		return "", None
 
-	def _generate_directly(self, question: str, prompt_history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+	def _generate_directly(
+		self,
+		question: str,
+		prompt_history: List[Dict[str, Any]],
+		fallback_reason: str,
+	) -> List[Dict[str, str]]:
+		"""Closed-book answer, reached only when graph search yields nothing.
+
+		fallback_reason names the exit that caused it, so fallback cost stays
+		separable per cause. The iteration and traversal depth in force when
+		the fallback fires are left untouched: they are the point in the search
+		at which PoG gave up, which is the fact worth measuring.
+		"""
 		out = generate_directly(
 			GenerateDirectlyInput(
 				question=question,
@@ -352,7 +398,11 @@ class PoGAgent:
 				temperature=self.temperature_reasoning,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(
+				OperationLabel.LLM_DIRECT_ANSWER,
+				fallback=True,
+				fallback_reason=fallback_reason,
+			),
 		)
 		self._record_prompt_history(
 			prompt_history=prompt_history,
@@ -378,7 +428,12 @@ class PoGAgent:
 
 		if not normalized_topic_entities:
 			logging.info("[PoG] no topic entities, fallback to generate_directly")
-			results = self._generate_directly(question, prompt_history)
+			# Pre-loop: the search never started, so there is no traversal depth.
+			energy_events.begin_iteration()
+			energy_events.set_traversal_depth(None)
+			results = self._generate_directly(
+				question, prompt_history,
+				energy_taxonomy.FALLBACK_NO_TOPIC_ENTITIES)
 			return {
 				"action": "generate_directly",
 				"question": question,
@@ -389,6 +444,10 @@ class PoGAgent:
 				"step_history": step_history,
 			}
 
+		# Planning happens once, before any graph traversal: it is a search
+		# round of its own (iteration 0) with no traversal depth.
+		energy_events.begin_iteration()
+		energy_events.set_traversal_depth(None)
 		subq_out = subquestion_decompose(
 			SubquestionDecomposeInput(
 				question=question,
@@ -397,7 +456,8 @@ class PoGAgent:
 				temperature=self.temperature_reasoning,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(
+				OperationLabel.LLM_SUBQUESTION_DECOMPOSE),
 		)
 		self._record_prompt_history(
 			prompt_history=prompt_history,
@@ -427,6 +487,13 @@ class PoGAgent:
 		pre_heads: List[Optional[bool]] = [None] * len(frontier_entities)
 
 		for current_depth in range(1, self.depth + 1):
+			# One pass of the depth loop = one search round. Reverse retrieval
+			# re-admits earlier entities into the next round rather than
+			# returning to a shallower depth, so both fields advance together
+			# here and the repetition inside the round stays metadata
+			# (frontier_index, group_index, reverse_round).
+			energy_events.begin_iteration()
+			energy_events.set_traversal_depth(current_depth)
 			logging.info("[PoG][depth=%s] start | frontier_size=%s", current_depth, len(frontier_entities))
 			candidate_groups: Dict[str, Dict[str, Any]] = {}
 			candidate_meta_by_entity_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -474,7 +541,8 @@ class PoGAgent:
 						temperature=self.temperature_exploration,
 						max_tokens=self.max_token,
 					),
-					llm_generate=self._llm_generate,
+					llm_generate=self._llm_generate_for(
+						OperationLabel.LLM_RELATION_RANK, frontier_index=idx),
 				)
 				self._record_prompt_history(
 					prompt_history=prompt_history,
@@ -560,7 +628,9 @@ class PoGAgent:
 			)
 			if not candidate_groups:
 				logging.info("[PoG][depth=%s] no new knowledge, fallback to generate_directly", current_depth)
-				fallback_results = self._generate_directly(question, prompt_history)
+				fallback_results = self._generate_directly(
+					question, prompt_history,
+					energy_taxonomy.FALLBACK_NO_CANDIDATE_GROUPS)
 				return {
 					"action": "generate_directly",
 					"question": question,
@@ -596,7 +666,14 @@ class PoGAgent:
 					temperature=self.temperature_reasoning,
 					max_tokens=self.max_token,
 				),
-				llm_generate=self._llm_generate,
+				# Same semantic operation as ToG entity scoring -- which
+				# candidates survive the hop -- decided by condition rather than
+				# score. One event per real per-group call; entity_condition_prune
+				# attaches the group_index itself. No aggregate wrapper event.
+				llm_generate=self._llm_generate_for(
+					OperationLabel.LLM_ENTITY_PRUNE,
+					prune_strategy=energy_taxonomy.PRUNE_STRATEGY_CONDITION,
+					group_count=len(candidate_groups)),
 			)
 			self._record_prompt_history(
 				prompt_history=prompt_history,
@@ -641,7 +718,9 @@ class PoGAgent:
 			)
 			if not selected_entities:
 				logging.info("[PoG][depth=%s] prune empty, fallback to generate_directly", current_depth)
-				fallback_results = self._generate_directly(question, prompt_history)
+				fallback_results = self._generate_directly(
+					question, prompt_history,
+					energy_taxonomy.FALLBACK_PRUNE_EMPTY)
 				return {
 					"action": "generate_directly",
 					"question": question,
@@ -681,7 +760,8 @@ class PoGAgent:
 					temperature=self.temperature_reasoning,
 					max_tokens=max(self.max_token, 1024),
 				),
-				llm_generate=self._llm_generate,
+				llm_generate=self._llm_generate_for(
+					OperationLabel.LLM_MEMORY_UPDATE),
 			)
 			self._record_prompt_history(
 				prompt_history=prompt_history,
@@ -707,7 +787,7 @@ class PoGAgent:
 					temperature=self.temperature_reasoning,
 					max_tokens=max(self.max_token, 1024),
 				),
-				llm_generate=self._llm_generate,
+				llm_generate=self._llm_generate_for(OperationLabel.LLM_REASON),
 			)
 			self._record_prompt_history(
 				prompt_history=prompt_history,
@@ -744,7 +824,9 @@ class PoGAgent:
 				if not results:
 					results = [{"id": ent.id if self._is_mid_like(ent.id) else "", "name": ent.name} for ent in selected_entities]
 				if not results:
-					results = self._generate_directly(question, prompt_history)
+					results = self._generate_directly(
+						question, prompt_history,
+						energy_taxonomy.FALLBACK_STOP_WITHOUT_RESULTS)
 				return {
 					"action": "stop",
 					"question": question,
@@ -779,7 +861,9 @@ class PoGAgent:
 					temperature=self.temperature_reasoning,
 					max_tokens=self.max_token,
 				),
-				llm_generate=self._llm_generate,
+				llm_generate=self._llm_generate_for(
+					OperationLabel.LLM_REVERSE_RETRIEVAL_DECISION,
+					reverse_round=reverse_round),
 			)
 			logging.info(
 				"[PoG][depth=%s] reverse_decision | need_reverse=%s | reverse_entities=%s",
@@ -802,7 +886,12 @@ class PoGAgent:
 			next_pre_heads: List[Optional[bool]] = list(selected_pre_heads)
 
 			if reverse_out.need_reverse and reverse_round < self.max_reverse_rounds:
-				reverse_round += 1
+				# meta.reverse_round identifies the reverse-retrieval *cycle*, so
+				# the decision and the selection that answer it carry the same
+				# 0-based value. The counter advances only once the cycle is
+				# complete; the guard above still reads it before this cycle runs,
+				# so the loop behaves exactly as before.
+				reverse_cycle = reverse_round
 				selector_prompt_template = self._get_user_prompt("reverse_entity_selector")
 				selector_system_prompt = self._get_system_prompt("reverse_entity_selector")
 				selector_prompt = (
@@ -812,7 +901,9 @@ class PoGAgent:
 					.replace("{{candidate_entities}}", str(filtered_candidate_entity_names))
 					.replace("{{memory}}", memory_text)
 				)
-				selector_response, selector_usage = self._llm_generate(
+				selector_response, selector_usage = self._llm_generate_for(
+					OperationLabel.LLM_REVERSE_ENTITY_SELECT,
+					reverse_round=reverse_cycle)(
 					user_prompt=selector_prompt,
 					temperature=self.temperature_reasoning,
 					max_tokens=self.max_token,
@@ -840,6 +931,10 @@ class PoGAgent:
 					next_pre_relations.append(add_rel)
 					next_pre_heads.append(add_head)
 
+				# Cycle complete: decision and selection are both recorded under
+				# reverse_cycle, so the counter advances only now.
+				reverse_round += 1
+
 			if reasoning_out.retrieve_entity:
 				retrieve_ent = name_to_entity.get(self._normalize_name(reasoning_out.retrieve_entity))
 				if retrieve_ent is not None and not any(existing.id == retrieve_ent.id and existing.name == retrieve_ent.name for existing in next_frontier):
@@ -864,7 +959,9 @@ class PoGAgent:
 			)
 
 		logging.info("[PoG] reached max depth or no stop, fallback to generate_directly")
-		fallback_results = self._generate_directly(question, prompt_history)
+		# Depth loop exhausted: keep the final depth reached, not null.
+		fallback_results = self._generate_directly(
+			question, prompt_history, energy_taxonomy.FALLBACK_DEPTH_EXHAUSTED)
 		if not fallback_results:
 			fallback_results = [{"id": ent.id if self._is_mid_like(ent.id) else "", "name": ent.name} for ent in frontier_entities if ent.name]
 		return {

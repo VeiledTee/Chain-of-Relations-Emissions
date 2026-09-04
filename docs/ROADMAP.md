@@ -41,8 +41,8 @@ difference is a property of the paradigm, not of the setup.
 | Paradigm | Instrumentation status |
 |---|---|
 | **Chain-of-Relations (CoR)** | on frozen schema v1 |
-| **Think-on-Graph (ToG)** | implemented; **not instrumented** |
-| **Plan-on-Graph (PoG)** | implemented; **limited legacy-format instrumentation** (a single `embedding:prune` event in `methods/pog/tools/entity_condition_prune.py`, using the pre-schema-v1 call form); **not migrated to schema v1** |
+| **Think-on-Graph (ToG)** | on frozen schema v1; four semantic LLM stages, all reused from the CoR vocabulary |
+| **Plan-on-Graph (PoG)** | on frozen schema v1; eight semantic LLM stages (four shared, four PoG-specific) plus `embedding:prune`, migrated to the schema-v1 call form |
 
 Datasets: **WebQSP** and **ComplexWebQuestions (CWQ)**.
 
@@ -326,18 +326,25 @@ Gemma pilot.
 This pilot determines whether anything needs correcting before scaling.
 
 ### Phase 5 — Extend unified measurement to ToG and PoG
-- [ ] Audit ToG semantic stages
-- [ ] Audit PoG semantic stages
-- [ ] Map both into the same canonical schema
+- [x] Audit ToG semantic stages
+- [x] Audit PoG semantic stages
+- [x] Map both into the same canonical schema
 - [ ] Validate each paradigm with small smoke runs
-- [ ] Ensure cross-paradigm operation categories remain analytically comparable
+- [x] Ensure cross-paradigm operation categories remain analytically comparable
 
-> **Instrumentation status.** Only CoR is on schema v1. **ToG has no
-> instrumentation.** **PoG has limited legacy-format instrumentation** — a
-> single `embedding:prune` event recorded through the pre-schema-v1 call form
-> in `chain_of_relations/methods/pog/tools/entity_condition_prune.py` — and is
-> **not migrated to schema v1**. Neither paradigm can currently produce a
-> schema-v1 trajectory.
+> **Instrumentation status.** All three paradigms emit schema-v1 events with
+> semantic operation labels; see MEASUREMENT_SPEC.md §5 and §5.1 for the
+> vocabularies. ToG reuses the CoR labels wherever the operation is the same
+> and adds none; PoG adds `llm:subquestion_decompose`, `llm:memory_update`,
+> `llm:reverse_retrieval_decision` and `llm:reverse_entity_select` for stages
+> no other paradigm has, and its `embedding:prune` event now uses the
+> schema-v1 call form. Labels come from each host paradigm; the profiler,
+> attribution and aggregation layers remain paradigm-agnostic, so
+> `paradigm,operation_label` aggregates without any special-casing.
+>
+> Remaining gap: **the Wikidata backend emits no KG events**, so a
+> `qald10_en` run has unmeasured — not zero — graph cost for every paradigm.
+> Smoke runs against the live stack are still outstanding for ToG and PoG.
 
 ### Phase 6 — Finalize `PoG_sub`
 - [ ] Quantify PoG runtime / depth behaviour

@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
+from chain_of_relations import energy_events
 from chain_of_relations.kg_backend import KGBackend, get_default_backend
 from chain_of_relations.schema import Entity, Relation
 
@@ -355,14 +356,20 @@ def entity_prune(
 
 	rng = random.Random(inp.random_seed)
 
-	for branch in inp.branches:
-		scored_candidates, record, branch_warnings, stats = _score_branch_candidates(
-			inp=inp,
-			branch=branch,
-			llm_generate=llm_generate,
-			name_resolver=resolved_name_resolver,
-			rng=rng,
-		)
+	for branch_index, branch in enumerate(inp.branches):
+		# The loop is the only place that knows which branch is being
+		# scored, so it attaches the index here. This adds no taxonomy
+		# knowledge to the shared tool: the caller still supplies the
+		# operation label. The scope covers the branch's name resolution
+		# too, which is work done for this same branch.
+		with energy_events.event_meta(branch_index=branch_index):
+			scored_candidates, record, branch_warnings, stats = _score_branch_candidates(
+				inp=inp,
+				branch=branch,
+				llm_generate=llm_generate,
+				name_resolver=resolved_name_resolver,
+				rng=rng,
+			)
 		record["before_sample"] = stats.get("before_sample", 0)
 		record["after_sample"] = stats.get("after_sample", 0)
 		prompt_records.append(record)

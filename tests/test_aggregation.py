@@ -533,5 +533,87 @@ class TestAgainstRecordedRuns(unittest.TestCase):
 		                "silently aggregated into a confident total")
 
 
+class TestMixedParadigmAggregation(unittest.TestCase):
+	"""One aggregation over CoR, ToG and PoG events at once.
+
+	The acceptance criterion for the ToG/PoG instrumentation slice: the
+	generic aggregator groups by (paradigm, operation_label) with no
+	paradigm-specific branch anywhere in it. Semantics come from the labels
+	the host agents attached; the aggregator only sums.
+	"""
+
+	MIXED = [
+		("cor", "llm:relation_rank", 12.0),
+		("cor", "llm:reason", 8.0),
+		("cor", "kg:relation_search", 0.5),
+		("tog", "llm:relation_rank", 9.0),
+		("tog", "llm:entity_prune", 15.0),
+		("tog", "llm:reason", 7.0),
+		("tog", "kg:entity_search", 0.4),
+		("pog", "llm:subquestion_decompose", 4.0),
+		("pog", "llm:entity_prune", 11.0),
+		("pog", "llm:memory_update", 6.0),
+		("pog", "llm:reverse_retrieval_decision", 3.0),
+		("pog", "embedding:prune", 1.5),
+	]
+
+	def events(self):
+		rows = []
+		for index, (paradigm, label, energy) in enumerate(self.MIXED):
+			rows.append(event(
+				paradigm=paradigm,
+				question_id=f"q-{paradigm}",
+				operation_label=label,
+				operation_type=label.split(":", 1)[0],
+				gpu_energy_j=energy,
+				step_index=index,
+				start_timestamp=100.0 + index,
+				end_timestamp=101.0 + index,
+			))
+		return rows
+
+	def rows(self):
+		return [r for r in aggregate.aggregate(
+			self.events(), group_by=("paradigm", "operation_label"),
+			domains=("gpu_energy_j",))
+			if r["row_kind"] == "measured"]
+
+	def test_every_paradigm_stage_gets_its_own_row(self):
+		got = {(r["paradigm"], r["operation_label"]): r["energy_j"]
+		       for r in self.rows()}
+		self.assertEqual(got, {(p, l): e for p, l, e in self.MIXED})
+
+	def test_a_shared_label_stays_separable_by_paradigm(self):
+		rows = {(r["paradigm"], r["operation_label"]): r["energy_j"]
+		        for r in self.rows()}
+		self.assertEqual(rows[("cor", "llm:relation_rank")], 12.0)
+		self.assertEqual(rows[("tog", "llm:relation_rank")], 9.0)
+		self.assertEqual(rows[("tog", "llm:entity_prune")], 15.0)
+		self.assertEqual(rows[("pog", "llm:entity_prune")], 11.0)
+
+	def test_llm_versus_kg_split_is_available_per_paradigm(self):
+		rows = [r for r in aggregate.aggregate(
+			self.events(), group_by=("paradigm", "operation_type"),
+			domains=("gpu_energy_j",)) if r["row_kind"] == "measured"]
+		got = {(r["paradigm"], r["operation_type"]): r["energy_j"] for r in rows}
+		self.assertEqual(got[("tog", "llm")], 31.0)
+		self.assertEqual(got[("tog", "kg")], 0.4)
+		self.assertEqual(got[("pog", "embedding")], 1.5)
+
+	def test_the_aggregator_needs_no_paradigm_specific_branch(self):
+		"""No paradigm name may appear in the aggregation layer's source."""
+		import inspect
+		source = inspect.getsource(aggregate)
+		for paradigm in ("cor", "tog", "pog", "chain_of_relations"):
+			self.assertNotIn(f'"{paradigm}"', source)
+			self.assertNotIn(f"'{paradigm}'", source)
+
+	def test_no_share_is_claimed_without_a_trajectory_reference(self):
+		for row in self.rows():
+			self.assertIsNone(row["share_of_trajectory"])
+			self.assertFalse(row["trajectory_reference_valid"])
+
+
+
 if __name__ == "__main__":
 	unittest.main()

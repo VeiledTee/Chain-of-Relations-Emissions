@@ -179,11 +179,22 @@ Details: [docs/RUNBOOK.md](docs/RUNBOOK.md#profiler-validation-protocol).
 
 ## Reproducing the experiments
 
-| Paradigm | Instrumentation status |
-|---|---|
-| **CoR** | on frozen **schema v1** |
-| **ToG** | implemented; **not instrumented** |
-| **PoG** | implemented; **limited legacy-format instrumentation**, **not migrated to schema v1** |
+| Paradigm | Instrumentation status | Semantic LLM stages |
+|---|---|---|
+| **CoR** | on frozen **schema v1** | `llm:relation_rank`, `llm:reason`, `llm:answer_filter`, `llm:direct_answer` |
+| **ToG** | on frozen **schema v1** | `llm:relation_rank`, `llm:entity_prune`, `llm:reason`, `llm:direct_answer` |
+| **PoG** | on frozen **schema v1** | `llm:subquestion_decompose`, `llm:relation_rank`, `llm:entity_prune`, `llm:memory_update`, `llm:reason`, `llm:reverse_retrieval_decision`, `llm:reverse_entity_select`, `llm:direct_answer` (plus `embedding:prune`) |
+
+Operation labels are supplied by each host paradigm, which knows why a
+given call is happening; measurement, attribution and aggregation stay
+generic and know nothing about any paradigm's stages. A label is shared
+between paradigms only where the operation genuinely is the same, so
+`paradigm,operation_label` is the natural grouping for cross-paradigm
+comparison and `paradigm,operation_type` for the LLM-versus-KG split.
+
+KG energy is instrumented once, at the Freebase backend. **The Wikidata
+backend emits no KG events**, so on `qald10_en` the graph cost is
+unmeasured, not zero, for every paradigm.
 
 Datasets are WebQSP and CWQ over a self-hosted Freebase (≈3.12B triples,
 verified as `3124793702`). The planned model ladder is Gemma 3 at

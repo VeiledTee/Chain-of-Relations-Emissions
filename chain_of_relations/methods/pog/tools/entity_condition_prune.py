@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from chain_of_relations import energy_events
+from chain_of_relations.energy_taxonomy import OperationLabel
 from chain_of_relations.schema import Entity, Relation
 
 
@@ -303,12 +305,15 @@ def _semantic_topn(question: str, entities: List[Entity], topn: int) -> List[Ent
 
 	model = _get_semantic_model()
 	entity_names = [str(entity.name or entity.id) for entity in entities]
-	from chain_of_relations import energy_events
+	# One event for the whole encode: the SentenceTransformer cut is a
+	# single physical operation, and it is the only embedding work any
+	# paradigm in this repository does. Migrated from the pre-schema-v1
+	# record(category, label, ...) signature; not a second event.
 	_t0 = energy_events.mark()
 	query_emb = model.encode(question)
 	doc_emb = model.encode(entity_names)
-	energy_events.record("tool", "embedding:prune", _t0, energy_events.mark(),
-		n_entities=len(entity_names))
+	energy_events.record(OperationLabel.EMBEDDING_PRUNE, _t0, energy_events.mark(),
+		n_entities=len(entity_names), topn=topn)
 	scores = util.dot_score(query_emb, doc_emb)[0].cpu().tolist()
 	scored_entities = sorted(zip(entities, scores), key=lambda item: float(item[1]), reverse=True)
 	return [item[0] for item in scored_entities[:topn]]
@@ -400,7 +405,8 @@ def entity_condition_prune(
 	response_blocks: List[str] = []
 	total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-	for group_id, group in sorted(inp.candidate_groups.items(), key=lambda item: str(item[0])):
+	for group_index, (group_id, group) in enumerate(
+			sorted(inp.candidate_groups.items(), key=lambda item: str(item[0]))):
 		relation_name = _normalize_group_rel_name(group)
 		head = _normalize_group_head(group)
 		entities = _normalize_group_entities(group)
@@ -421,7 +427,9 @@ def entity_condition_prune(
 			warnings.append(f"Group {group_id}: sampled 10 MID entities before pruning.")
 
 		if len(entities) > 70:
-			entities = _semantic_topn(inp.question, entities, 70)
+			with energy_events.event_meta(group_index=group_index,
+			                              group_id=str(group_id)):
+				entities = _semantic_topn(inp.question, entities, 70)
 			warnings.append(f"Group {group_id}: reduced candidates to semantic top-70 before pruning.")
 
 		sorted_entities = sorted(entities, key=lambda item: str(item.name or item.id))
@@ -437,14 +445,18 @@ def entity_condition_prune(
 		)
 		prompt_blocks.append(prompt)
 
-		response, usage = _run_llm(
-			llm_generate=llm_generate,
-			prompt=prompt,
-			temperature=inp.temperature,
-			max_tokens=inp.max_tokens,
-			max_retries=inp.max_retries,
-			system_prompt=inp.system_prompt,
-		)
+		# The loop is the only place that knows which candidate group is
+		# being pruned; the caller still supplies the operation label.
+		with energy_events.event_meta(group_index=group_index,
+		                              group_id=str(group_id)):
+			response, usage = _run_llm(
+				llm_generate=llm_generate,
+				prompt=prompt,
+				temperature=inp.temperature,
+				max_tokens=inp.max_tokens,
+				max_retries=inp.max_retries,
+				system_prompt=inp.system_prompt,
+			)
 		if response:
 			response_blocks.append(response)
 

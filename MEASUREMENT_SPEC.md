@@ -2,8 +2,10 @@
 
 **Status:** measurement protocol contract for this study.
 **Schema:** event schema v1 (frozen — see §4).
-**Scope:** Chain-of-Relations (CoR) over Freebase. ToG, PoG and SubgraphRAG are
-out of scope for this document.
+**Scope:** Chain-of-Relations (CoR) over Freebase. The ToG and PoG operation
+vocabularies are stated in §5.1; everything else in this document
+(boundary, accounting, attribution, validation) is paradigm-independent and
+applies to all three. SubgraphRAG is out of scope.
 
 This is a research-method contract, not developer documentation. It states what
 is measured, what is explicitly *not* measured, and what the instrument's
@@ -167,7 +169,70 @@ from prompt text.
 taxonomy for other paradigms but are **not** part of the CoR taxonomy: CoR has
 no embedding stage and does not use `tools/entity_prune.py`.
 
-`llm:generate` is legacy and must never appear in a CoR run.
+`llm:generate` is legacy and must never appear in a CoR, ToG or PoG run.
+
+### 5.1 ToG and PoG
+
+Same rules, same schema, same frozen field set. A label is reused across
+paradigms only where the semantic operation is genuinely the same; a new label
+exists only where a paradigm does something the others do not. No label was
+created to make the three look symmetrical.
+
+**ToG** (`methods/tog/agent.py`) introduces no label of its own:
+
+| Label | Real ToG call site | Semantic stage |
+|---|---|---|
+| `llm:relation_rank` | `relation_prune` per frontier entity | LLM selects relations to expand |
+| `llm:entity_prune` | `entity_prune`, one call **per branch** | LLM scores candidate entities; top-k survive. `meta.prune_strategy="score"`, `meta.branch_index` |
+| `llm:reason` | `_run_reasoning_yes_no` | LLM decides sufficient / keep going, and may emit the answer |
+| `llm:direct_answer` | `_generate_directly` (five exits) | Closed-book fallback; `meta.fallback_reason` names the exit |
+
+ToG has no answer-filter stage and no embedding stage, so it emits neither.
+
+**PoG** (`methods/pog/agent.py`) reuses four labels and adds four:
+
+| Label | Real PoG call site | Semantic stage |
+|---|---|---|
+| `llm:subquestion_decompose` | `subquestion_decompose`, once before the loop | LLM decomposes the question into sub-objectives |
+| `llm:relation_rank` | `relation_prune` per frontier entity | as CoR/ToG |
+| `llm:entity_prune` | `entity_condition_prune`, one call **per candidate group** | LLM keeps the candidates satisfying the current subquestion. `meta.prune_strategy="condition"`, `meta.group_index` |
+| `embedding:prune` | `_semantic_topn` | SentenceTransformer cut applied before the LLM sees a group over 70 candidates |
+| `llm:memory_update` | `memory_update` | LLM rewrites the working-memory JSON from the new triples |
+| `llm:reason` | `pog_reasoning` | LLM judges sufficiency and produces the answer |
+| `llm:reverse_retrieval_decision` | `reverse_retrieval_decider` | LLM decides whether to reverse-retrieve. `meta.reverse_round` |
+| `llm:reverse_entity_select` | the reverse entity selector call | LLM picks which earlier entities re-enter the frontier. `meta.reverse_round` |
+| `llm:direct_answer` | `_generate_directly` (five exits) | Closed-book fallback; `meta.fallback_reason` names the exit |
+
+`llm:entity_prune` is deliberately shared: "which candidate entities survive
+this hop" is one operation, and `meta.prune_strategy` records how each
+paradigm decides it, so the comparison does not pretend the mechanisms are
+identical.
+
+**Structural context.** `iteration` is the outer search round (CoR: one DFS
+state pop; ToG/PoG: one pass of the depth loop). `traversal_depth` is the
+actual graph traversal depth and is the comparable structural field across
+paradigms. `step_index` orders measured events within the question. Repeated
+work inside one round is metadata, never a new iteration: `frontier_index`,
+`branch_index`, `group_index`, `reverse_round`. `reverse_round` identifies a
+whole reverse-retrieval cycle, 0-based: the decision and the selection that
+answers it carry the same value, so grouping by it gives the cost of the cycle.
+A cycle refused by `max_reverse_rounds` records its decision alone, which is a
+fact about the run rather than a gap in the instrumentation. For ToG and PoG the depth
+loop never revisits a shallower depth, so iteration and traversal depth
+advance together there; only CoR backtracks, and only CoR shows a falling
+traversal depth against a rising iteration.
+
+**Fallback context.** A `llm:direct_answer` event keeps the iteration and
+traversal depth in force when the fallback fired: that is where the search
+gave up. Depth is null only where the fallback genuinely runs outside the
+traversal (no topic entities, or CoR's post-DFS fallback).
+
+**KG instrumentation.** All three paradigms share one instrumented boundary,
+`kg_backend/freebase/db_func.py`, so KG events are emitted once per physical
+round trip and no agent adds a span of its own. The **Wikidata backend is not
+instrumented**: on `qald10_en` a run emits LLM and embedding events but no
+`kg:*` events at all, and that absence must be read as unmeasured, never as
+zero graph cost (`energy_taxonomy.WIKIDATA_KG_UNINSTRUMENTED`).
 
 ---
 

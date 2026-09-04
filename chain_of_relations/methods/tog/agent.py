@@ -20,6 +20,9 @@ import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 
+from chain_of_relations import energy_events
+from chain_of_relations import energy_taxonomy
+from chain_of_relations.energy_taxonomy import OperationLabel
 from chain_of_relations.llm_api import LLMAPI
 from chain_of_relations.kg_backend import KGBackend, get_default_backend
 from chain_of_relations.schema import Entity, Relation
@@ -119,6 +122,45 @@ class ToGAgent:
 			system_prompt=system_prompt,
 		)
 
+	def _llm_generate_for(self, operation_label, **extra_meta):
+		"""An llm_generate bound to one semantic ToG stage.
+
+		Same pattern as CoRAgent._llm_generate_for: the shared tools
+		(tools/relation_prune.py, tools/entity_prune.py, ...) are used by all
+		three paradigms and must not learn about the taxonomy, so this agent
+		-- the caller that knows *why* the model is being invoked -- binds the
+		label here and the tool calls it unchanged. Never inferred from prompt
+		text.
+
+		Retry accounting keeps the two CoR levels distinct:
+
+		  meta.attempts      retries inside one LLMAPI.generate call, which
+		                     collapse into a single event.
+		  meta.tool_attempt  the shared tool's own retry loop, where each pass
+		                     is a separate llm_generate call and so a separate
+		                     event. Counted per stage invocation.
+
+		One closure is created per stage invocation, so tool_attempt also
+		counts the per-branch calls a tool makes internally; where the branch
+		or group identity matters the tool itself attaches it (branch_index,
+		group_index).
+		"""
+		state = {"tool_attempt": 0}
+
+		def generate(user_prompt, temperature, max_tokens, system_prompt=None):
+			state["tool_attempt"] += 1
+			with energy_events.operation(operation_label), \
+			     energy_events.event_meta(tool_attempt=state["tool_attempt"],
+			                              **extra_meta):
+				return self._llm_generate(
+					user_prompt=user_prompt,
+					temperature=temperature,
+					max_tokens=max_tokens,
+					system_prompt=system_prompt,
+				)
+
+		return generate
+
 	@staticmethod
 	def _normalize_topic_entities(topic_entities: List[Any]) -> List[Entity]:
 		normalized_entities: List[Entity] = []
@@ -175,7 +217,7 @@ class ToGAgent:
 			.replace("{{reasoning_path}}", chain_text)
 		)
 
-		response, usage = self._llm_generate(
+		response, usage = self._llm_generate_for(OperationLabel.LLM_REASON)(
 			user_prompt=user_prompt,
 			temperature=self.temperature_reasoning,
 			max_tokens=self.max_token,
@@ -220,7 +262,19 @@ class ToGAgent:
 
 		return decision, answers, response
 
-	def _generate_directly(self, question: str, prompt_history: List[Dict[str, Any]]) -> str:
+	def _generate_directly(
+		self,
+		question: str,
+		prompt_history: List[Dict[str, Any]],
+		fallback_reason: str,
+	) -> str:
+		"""Closed-book answer, reached only when graph search yields nothing.
+
+		fallback_reason names the exit that caused it, so fallback cost stays
+		separable per cause. The iteration and traversal depth in force when
+		the fallback fires are left untouched: they are the point in the search
+		at which ToG gave up, which is the fact worth measuring.
+		"""
 		out = generate_directly(
 			GenerateDirectlyInput(
 				question=question,
@@ -229,7 +283,11 @@ class ToGAgent:
 				temperature=self.temperature_reasoning,
 				max_tokens=self.max_token,
 			),
-			llm_generate=self._llm_generate,
+			llm_generate=self._llm_generate_for(
+				OperationLabel.LLM_DIRECT_ANSWER,
+				fallback=True,
+				fallback_reason=fallback_reason,
+			),
 		)
 
 		prompt_history.append(
@@ -257,7 +315,12 @@ class ToGAgent:
 		self._reset_trace()
 
 		if not normalized_entities:
-			direct_answer = self._generate_directly(question, prompt_history)
+			# Pre-loop: the search never started, so there is no traversal depth.
+			energy_events.begin_iteration()
+			energy_events.set_traversal_depth(None)
+			direct_answer = self._generate_directly(
+				question, prompt_history,
+				energy_taxonomy.FALLBACK_NO_TOPIC_ENTITIES)
 			results = [direct_answer] if direct_answer else []
 			return {
 				"action": "generate_directly",
@@ -275,6 +338,13 @@ class ToGAgent:
 		pre_heads: List[Optional[bool]] = [None] * len(frontier_entities)
 
 		for depth in range(1, self.depth + 1):
+			# One pass of the depth loop = one search round. ToG expands the
+			# whole frontier per round and never returns to a shallower depth,
+			# so iteration and traversal_depth advance together here; the
+			# per-entity and per-branch repetition inside the round is metadata
+			# (frontier_index, branch_index), not a new iteration.
+			energy_events.begin_iteration()
+			energy_events.set_traversal_depth(depth)
 			logging.info("[ToG] depth=%s | frontier_size=%s", depth, len(frontier_entities))
 
 			branches: List[EntityPruneBranchInput] = []
@@ -341,7 +411,8 @@ class ToGAgent:
 						max_tokens=self.max_token,
 						system_prompt=self._get_system_prompt("relation_pruning"),
 					),
-					llm_generate=self._llm_generate,
+					llm_generate=self._llm_generate_for(
+						OperationLabel.LLM_RELATION_RANK, frontier_index=index),
 				)
 
 				prompt_history.append(
@@ -403,7 +474,9 @@ class ToGAgent:
 					)
 
 			if not branches:
-				direct_answer = self._generate_directly(question, prompt_history)
+				direct_answer = self._generate_directly(
+					question, prompt_history,
+					energy_taxonomy.FALLBACK_NO_BRANCHES)
 				results = [direct_answer] if direct_answer else []
 				return {
 					"action": "generate_directly",
@@ -426,7 +499,12 @@ class ToGAgent:
 					max_tokens=self.max_token,
 					system_prompt=self._get_system_prompt("entity_pruning"),
 				),
-				llm_generate=self._llm_generate,
+				# One event per real per-branch call; entity_prune attaches the
+				# branch_index itself. No aggregate wrapper event.
+				llm_generate=self._llm_generate_for(
+					OperationLabel.LLM_ENTITY_PRUNE,
+					prune_strategy=energy_taxonomy.PRUNE_STRATEGY_SCORE,
+					branch_count=len(branches)),
 			)
 
 			for record in entity_prune_out.prompt_records:
@@ -450,7 +528,9 @@ class ToGAgent:
 				cluster_chain_of_entities.extend(entity_prune_out.chain_of_entities)
 
 			if not entity_prune_out.success:
-				direct_answer = self._generate_directly(question, prompt_history)
+				direct_answer = self._generate_directly(
+					question, prompt_history,
+					energy_taxonomy.FALLBACK_ENTITY_PRUNE_FAILED)
 				results = [direct_answer] if direct_answer else []
 				return {
 					"action": "generate_directly",
@@ -486,7 +566,9 @@ class ToGAgent:
 			pre_relations = [relation.id for relation in entity_prune_out.selected_relations]
 			pre_heads = [bool(head_flag) for head_flag in entity_prune_out.selected_heads]
 			if not frontier_entities:
-				direct_answer = self._generate_directly(question, prompt_history)
+				direct_answer = self._generate_directly(
+					question, prompt_history,
+					energy_taxonomy.FALLBACK_EMPTY_FRONTIER)
 				results = [direct_answer] if direct_answer else []
 				return {
 					"action": "generate_directly",
@@ -498,7 +580,9 @@ class ToGAgent:
 					"step_history": step_history,
 				}
 
-		direct_answer = self._generate_directly(question, prompt_history)
+		# Depth loop exhausted: keep the final depth reached, not null.
+		direct_answer = self._generate_directly(
+			question, prompt_history, energy_taxonomy.FALLBACK_DEPTH_EXHAUSTED)
 		results = [direct_answer] if direct_answer else []
 		return {
 			"action": "generate_directly",
