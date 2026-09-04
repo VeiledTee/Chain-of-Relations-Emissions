@@ -203,6 +203,150 @@ class TestBoundaryVerdict(unittest.TestCase):
 		self.assertEqual(verdict["domains"]["cpu_package"]["status"], hw.UNREADABLE)
 
 
+class TestCounterConsistency(unittest.TestCase):
+	"""Recorded hardware cases, not synthetic ones.
+
+	Both figures below came from the same 10 s probe run on real machines:
+	cumulative NVML energy differenced across the window, against the
+	trapezoidal integral of nvmlDeviceGetPowerUsage sampled at 20 Hz.
+	"""
+
+	# RTX 4090, WSL: counter and integrated power agree to ~0.1%.
+	GOOD = dict(counter_j=1005.0, sampled_j=1004.0, elapsed_s=10.0, n_samples=200)
+	# RTX 3050 Ti Laptop, bare-metal Ubuntu: counter advances steadily at a rate
+	# no reading of board power can account for.
+	BAD = dict(counter_j=954.652, sampled_j=67.106, elapsed_s=10.0, n_samples=200)
+
+	def test_known_good_counter_is_supported(self):
+		r = hw.assess_counter_consistency(**self.GOOD)
+		self.assertEqual(r["verdict"], hw.SUPPORTED, r["detail"])
+		self.assertLess(r["relative_difference_pct"], 1.0)
+
+	def test_known_bad_counter_is_inconsistent(self):
+		r = hw.assess_counter_consistency(**self.BAD)
+		self.assertEqual(r["verdict"], hw.INCONSISTENT, r["detail"])
+		self.assertAlmostEqual(r["ratio"], 14.226, places=2)
+		self.assertAlmostEqual(r["relative_difference_pct"], 1322.6, places=0)
+
+	def test_inconsistent_is_not_supported_and_not_merely_unknown(self):
+		"""Advancing-but-wrong must be its own verdict: not SUPPORTED, and not
+		silently folded into 'we could not tell'."""
+		verdict = hw.assess_counter_consistency(**self.BAD)["verdict"]
+		self.assertNotEqual(verdict, hw.SUPPORTED)
+		self.assertNotEqual(verdict, hw.UNKNOWN)
+
+	def test_tolerance_is_not_tuned_to_these_two_machines(self):
+		"""The band must be a general one: comfortably wider than sampling
+		noise, far narrower than the observed failure."""
+		self.assertGreaterEqual(hw.CONSISTENCY_REL_TOL, 0.25)
+		self.assertLessEqual(hw.CONSISTENCY_REL_TOL, 1.0)
+		good = hw.assess_counter_consistency(**self.GOOD)
+		bad = hw.assess_counter_consistency(**self.BAD)
+		self.assertLess(good["difference_j"], good["tolerance_j"] / 10.0)
+		self.assertGreater(bad["difference_j"], bad["tolerance_j"] * 10.0)
+
+	def test_ordinary_sampling_noise_still_passes(self):
+		"""A 20% disagreement is normal for 20 Hz sampling of a bursty load."""
+		for sampled in (833.0, 1200.0):  # counter 20% above and below sampled
+			r = hw.assess_counter_consistency(counter_j=1000.0, sampled_j=sampled,
+			                                  elapsed_s=10.0, n_samples=200)
+			self.assertEqual(r["verdict"], hw.SUPPORTED, r["detail"])
+
+	def test_counter_off_by_a_factor_of_two_fails(self):
+		r = hw.assess_counter_consistency(counter_j=2000.0, sampled_j=1000.0,
+		                                  elapsed_s=10.0, n_samples=200)
+		self.assertEqual(r["verdict"], hw.INCONSISTENT)
+
+	def test_undercounting_is_caught_as_well_as_overcounting(self):
+		r = hw.assess_counter_consistency(counter_j=100.0, sampled_j=1000.0,
+		                                  elapsed_s=10.0, n_samples=200)
+		self.assertEqual(r["verdict"], hw.INCONSISTENT)
+
+	def test_short_window_yields_no_verdict(self):
+		r = hw.assess_counter_consistency(counter_j=954.0, sampled_j=67.0,
+		                                  elapsed_s=0.5, n_samples=10)
+		self.assertEqual(r["verdict"], hw.UNKNOWN)
+
+	def test_idle_window_with_too_little_energy_yields_no_verdict(self):
+		r = hw.assess_counter_consistency(counter_j=0.4, sampled_j=0.1,
+		                                  elapsed_s=10.0, n_samples=200)
+		self.assertEqual(r["verdict"], hw.UNKNOWN)
+
+	def test_missing_signal_yields_no_verdict_not_a_failure(self):
+		self.assertEqual(
+			hw.assess_counter_consistency(None, 10.0, 10.0, 200)["verdict"],
+			hw.UNKNOWN)
+		self.assertEqual(
+			hw.assess_counter_consistency(10.0, None, 10.0, 200)["verdict"],
+			hw.UNKNOWN)
+
+	def test_edge_allowance_covers_a_bursty_mostly_idle_window(self):
+		"""Window edges are not sample-aligned. On an idle window with bursts,
+		the misalignment is worth burst power, so peak power sets the floor of
+		the tolerance and such a window is not condemned."""
+		bursty = dict(counter_j=40.0, sampled_j=20.0, elapsed_s=10.0, n_samples=200)
+		self.assertEqual(
+			hw.assess_counter_consistency(**bursty)["verdict"], hw.INCONSISTENT)
+		r = hw.assess_counter_consistency(peak_power_w=250.0, **bursty)
+		self.assertEqual(r["verdict"], hw.SUPPORTED, r["detail"])
+
+	def test_peak_power_allowance_cannot_rescue_the_known_bad_counter(self):
+		"""The edge allowance is bounded by real board power: a 14x counter
+		stays rejected even when the GPU peaked at its power limit."""
+		r = hw.assess_counter_consistency(peak_power_w=80.0, **self.BAD)
+		self.assertEqual(r["verdict"], hw.INCONSISTENT, r["detail"])
+
+	def test_integrate_power_is_a_trapezoidal_integral(self):
+		self.assertAlmostEqual(hw.integrate_power([(0.0, 10.0), (1.0, 20.0)]), 15.0)
+		self.assertAlmostEqual(hw.integrate_power([(0.0, 5.0)]), 0.0)
+		self.assertAlmostEqual(hw.integrate_power([]), 0.0)
+
+
+class TestInconsistentCounterLeavesTheBoundary(unittest.TestCase):
+
+	def _nvml(self, verdict, **extra):
+		nvml = {"status": hw.SUPPORTED, "cumulative_energy_status": hw.SUPPORTED,
+		        "counter_consistency": {"verdict": verdict}}
+		nvml.update(extra)
+		return nvml
+
+	def test_inconsistent_gpu_counter_is_not_an_available_domain(self):
+		verdict = hw.boundary_verdict(self._nvml(hw.INCONSISTENT), [])
+		self.assertNotIn("gpu", verdict["available_energy_domains"])
+		self.assertIn("gpu", verdict["missing_domains"])
+		self.assertEqual(verdict["domains"]["gpu"]["status"], hw.INCONSISTENT)
+		self.assertFalse(verdict["measurement_complete_possible"])
+
+	def test_inconsistent_gpu_blocks_an_otherwise_complete_host(self):
+		zones = [{"name": "package-0", "domain": "cpu_package", "status": hw.SUPPORTED},
+		         {"name": "dram", "domain": "dram", "status": hw.SUPPORTED}]
+		verdict = hw.boundary_verdict(self._nvml(hw.INCONSISTENT), zones)
+		self.assertFalse(verdict["measurement_complete_possible"])
+		self.assertEqual(verdict["missing_domains"], ["gpu"])
+
+	def test_consistent_gpu_counter_remains_supported(self):
+		verdict = hw.boundary_verdict(self._nvml(hw.SUPPORTED), [])
+		self.assertEqual(verdict["available_energy_domains"], ["gpu"])
+
+	def test_unknown_verdict_does_not_revoke_a_readable_counter(self):
+		"""No claim either way must not be treated as evidence of failure."""
+		verdict = hw.boundary_verdict(self._nvml(hw.UNKNOWN), [])
+		self.assertEqual(verdict["available_energy_domains"], ["gpu"])
+
+	def test_host_without_the_cross_check_behaves_as_before(self):
+		nvml = {"status": hw.SUPPORTED, "cumulative_energy_status": hw.SUPPORTED}
+		self.assertEqual(hw.boundary_verdict(nvml, [])["available_energy_domains"],
+		                 ["gpu"])
+
+	def test_sampled_power_never_becomes_the_gpu_source(self):
+		"""Even where sampled power is the only credible figure, it is not a
+		measurement: the domain goes missing rather than being filled in."""
+		verdict = hw.boundary_verdict(self._nvml(hw.INCONSISTENT), [])
+		source = verdict["domains"]["gpu"]["source"] or ""
+		self.assertNotIn("sampled", source.lower())
+		self.assertIn("gpu", verdict["missing_domains"])
+
+
 # --------------------------------------------------------------------------
 # trajectory accounting
 # --------------------------------------------------------------------------

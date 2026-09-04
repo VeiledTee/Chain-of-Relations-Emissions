@@ -8,7 +8,9 @@ host actually measure?
 Every domain is reported with an explicit status. Nothing missing is ever
 reported as zero.
 
-    SUPPORTED    present and readable, values advance
+    SUPPORTED    present and readable, values advance, values are credible
+    INCONSISTENT counter advances but disagrees grossly with independent
+                 physical evidence; present but not usable as a measurement
     UNREADABLE   present but permissions/errors block reading
     UNAVAILABLE  the host does not expose this domain at all
     UNKNOWN      probe could not determine the state
@@ -34,6 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # re-exported here because they are part of this module's published surface.
 from .hardware.discovery import (  # noqa: E402
 	BOUNDARY_DOMAINS,
+	INCONSISTENT,
 	DIAGNOSTIC_DOMAINS,
 	EXCLUDED_DOMAINS,
 	SUPPORTED,
@@ -156,6 +159,171 @@ def probe_nvml(settle=1.0):
 	report["cumulative_energy_status"] = SUPPORTED if energy_ok else UNAVAILABLE
 	report["detail"] = f"{len(energy_ok)}/{count} device(s) expose cumulative energy"
 	return report
+
+
+# --------------------------------------------------------------------------
+# GPU cumulative-counter consistency
+# --------------------------------------------------------------------------
+#
+# An advancing counter is not the same as a correct counter. Some drivers and
+# some parts (observed on a laptop GPU under bare-metal Linux) return a
+# nvmlDeviceGetTotalEnergyConsumption register that increments steadily but at
+# a rate that no reading of board power can account for. Such a counter passes
+# the "present and advancing" probe and would silently poison every joule in
+# the study.
+#
+# The cross-check integrates the *diagnostic* instantaneous-power signal over
+# the same window and asks whether the counter is of the right physical size.
+# Sampled power is used only as a plausibility yardstick here: it never becomes
+# a measurement, is never substituted for a missing counter, and a host that
+# passes this check still reports energy exclusively from the counter.
+
+#: Default cross-check window. Long enough that counter-update quantisation and
+#: sampling phase are small next to the integral, short enough to run in a probe.
+CONSISTENCY_WINDOW_S = 10.0
+#: Power poll spacing. ~20 Hz: well inside NVML's own power refresh rate.
+CONSISTENCY_SAMPLE_INTERVAL_S = 0.05
+
+#: Relative band. Trapezoidal integration of a ~10 Hz-refreshed power reading
+#: against a hardware integrator is a genuinely noisy comparison: transients
+#: between polls are missed in both directions, the power reading is itself a
+#: driver-side average over an unspecified window, and board power and the
+#: energy register need not cover byte-identical rails. Half an order of
+#: magnitude of disagreement is therefore tolerated, which still bounds the
+#: counter to within a factor of 1.5. Grossly invalid counters observed in
+#: practice are off by multiples, not by tens of percent.
+CONSISTENCY_REL_TOL = 0.50
+#: Absolute allowance for edge effects: the two counter reads do not coincide
+#: with the first and last power samples, and the counter advances in discrete
+#: steps, so a slice of real work can fall on one side of the comparison only.
+#: Bounded by peak observed board power (falling back to the average) times this
+#: slop -- peak, because on a mostly-idle window with bursts at the edges the
+#: misalignment is worth burst power, not mean power. Always scaled by the
+#: sampled signal, never by the counter, so an inflated counter cannot widen its
+#: own tolerance.
+CONSISTENCY_EDGE_SLOP_S = 0.25
+#: Below these the comparison says nothing; report UNKNOWN rather than a verdict.
+CONSISTENCY_MIN_WINDOW_S = 5.0
+CONSISTENCY_MIN_SAMPLES = 20
+CONSISTENCY_MIN_ENERGY_J = 1.0
+
+
+def integrate_power(samples):
+	"""Trapezoidal integral of (timestamp_s, power_w) pairs, in joules.
+
+	Diagnostic only. The result is never reported as measured GPU energy.
+	"""
+	total = 0.0
+	for (ta, pa), (tb, pb) in zip(samples, samples[1:]):
+		total += (tb - ta) * (pa + pb) / 2.0
+	return total
+
+
+def assess_counter_consistency(counter_j, sampled_j, elapsed_s, n_samples,
+                               sample_interval_s=CONSISTENCY_SAMPLE_INTERVAL_S,
+                               peak_power_w=None):
+	"""Is the cumulative energy counter physically credible on this host?
+
+	Pure function so the verdict can be tested against recorded hardware cases
+	without a GPU present.
+
+	Verdicts:
+	  SUPPORTED     counter and integrated power agree within tolerance
+	  INCONSISTENT  counter advances but disagrees grossly: not usable
+	  UNKNOWN       window/signal too small to judge; no claim either way
+	"""
+	result = {
+		"counter_energy_j": counter_j,
+		"sampled_energy_j": sampled_j,
+		"elapsed_s": elapsed_s,
+		"n_samples": n_samples,
+	}
+	if counter_j is None or sampled_j is None:
+		result.update(verdict=UNKNOWN, detail="counter or sampled power unavailable")
+		return result
+	if elapsed_s < CONSISTENCY_MIN_WINDOW_S or n_samples < CONSISTENCY_MIN_SAMPLES:
+		result.update(verdict=UNKNOWN,
+		              detail=(f"window too short to judge: {elapsed_s:.2f}s / "
+		                      f"{n_samples} samples"))
+		return result
+	if sampled_j < CONSISTENCY_MIN_ENERGY_J or counter_j < CONSISTENCY_MIN_ENERGY_J:
+		result.update(verdict=UNKNOWN,
+		              detail=(f"too little energy in the window to judge: "
+		                      f"counter {counter_j:.3f} J, sampled {sampled_j:.3f} J"))
+		return result
+
+	sampled_avg_w = sampled_j / elapsed_s
+	edge_slop_s = CONSISTENCY_EDGE_SLOP_S + 2.0 * sample_interval_s
+	edge_power_w = max(peak_power_w or 0.0, sampled_avg_w)
+	abs_tol_j = edge_power_w * edge_slop_s
+	tolerance_j = max(CONSISTENCY_REL_TOL * sampled_j, abs_tol_j)
+	difference_j = abs(counter_j - sampled_j)
+
+	result.update(
+		counter_avg_power_w=counter_j / elapsed_s,
+		sampled_avg_power_w=sampled_avg_w,
+		ratio=counter_j / sampled_j,
+		relative_difference_pct=difference_j / sampled_j * 100.0,
+		difference_j=difference_j,
+		tolerance_j=tolerance_j,
+		rel_tol=CONSISTENCY_REL_TOL,
+		abs_tol_j=abs_tol_j,
+		peak_power_w=peak_power_w,
+	)
+	if difference_j <= tolerance_j:
+		result.update(
+			verdict=SUPPORTED,
+			detail=(f"counter {counter_j:.3f} J vs integrated power "
+			        f"{sampled_j:.3f} J: {result['relative_difference_pct']:.1f}% "
+			        f"apart, within tolerance {tolerance_j:.3f} J"))
+	else:
+		result.update(
+			verdict=INCONSISTENT,
+			detail=(f"counter {counter_j:.3f} J is {result['ratio']:.3f}x the "
+			        f"integrated power {sampled_j:.3f} J "
+			        f"({result['relative_difference_pct']:.1f}% apart, tolerance "
+			        f"{tolerance_j:.3f} J): counter advances but is not "
+			        f"physically credible; GPU energy is not usable on this host"))
+	return result
+
+
+def probe_gpu_counter_consistency(handle=None,
+                                  window_s=CONSISTENCY_WINDOW_S,
+                                  sample_interval_s=CONSISTENCY_SAMPLE_INTERVAL_S):
+	"""Cross-check device 0's energy counter against integrated board power."""
+	try:
+		import pynvml
+		pynvml.nvmlInit()
+		h = handle if handle is not None else pynvml.nvmlDeviceGetHandleByIndex(0)
+		name = _decode(pynvml.nvmlDeviceGetName(h))
+	except Exception as e:
+		return {"verdict": UNKNOWN, "detail": f"NVML unavailable: {e}"}
+
+	samples = []
+	try:
+		start_mj = pynvml.nvmlDeviceGetTotalEnergyConsumption(h)
+		t0 = time.monotonic()
+		while time.monotonic() - t0 < window_s:
+			samples.append((time.monotonic(),
+			                pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0))
+			time.sleep(sample_interval_s)
+		t1 = time.monotonic()
+		end_mj = pynvml.nvmlDeviceGetTotalEnergyConsumption(h)
+	except Exception as e:
+		return {"verdict": UNKNOWN, "detail": f"probe read failed: {e}",
+		        "device": name}
+
+	result = assess_counter_consistency(
+		counter_j=(end_mj - start_mj) / 1000.0,
+		sampled_j=integrate_power(samples),
+		elapsed_s=t1 - t0,
+		n_samples=len(samples),
+		sample_interval_s=sample_interval_s,
+		peak_power_w=max((p for _, p in samples), default=None),
+	)
+	result["device"] = name
+	result["method"] = "cumulative counter vs trapezoidal integral of sampled power"
+	return result
 
 
 def probe_nvml_resolution(samples=3000, interval=0.001):
@@ -311,7 +479,15 @@ def boundary_verdict(nvml, zones):
 	can ever be complete here."""
 	domains = {d: {"status": UNAVAILABLE, "source": None} for d in BOUNDARY_DOMAINS}
 
-	if nvml.get("cumulative_energy_status") == SUPPORTED:
+	consistency = nvml.get("counter_consistency") or {}
+	if consistency.get("verdict") == INCONSISTENT:
+		# The counter is present and advancing but not physically credible.
+		# Advancing is not the same as correct: this host may not contribute
+		# GPU energy to the boundary.
+		domains["gpu"] = {"status": INCONSISTENT,
+		                  "source": "nvml cumulative counter failed the "
+		                            "power-consistency cross-check"}
+	elif nvml.get("cumulative_energy_status") == SUPPORTED:
 		domains["gpu"] = {"status": SUPPORTED, "source": "nvml_total_energy_consumption"}
 	elif nvml.get("status") == SUPPORTED:
 		domains["gpu"] = {"status": UNREADABLE,
@@ -344,16 +520,25 @@ def boundary_verdict(nvml, zones):
 	}
 
 
-def build_report(settle=0.5, resolution_samples=3000):
+def build_report(settle=0.5, resolution_samples=3000,
+                 consistency_window_s=CONSISTENCY_WINDOW_S):
 	host = probe_host()
 	nvml = probe_nvml(settle=max(settle, 1.0))
+	if nvml.get("cumulative_energy_status") == SUPPORTED and consistency_window_s > 0:
+		consistency = probe_gpu_counter_consistency(window_s=consistency_window_s)
+		nvml["counter_consistency"] = consistency
+		if consistency.get("verdict") == INCONSISTENT:
+			# Keep the raw fact (the counter reads and advances) and mark the
+			# capability separately: never report an unusable counter as SUPPORTED.
+			nvml["cumulative_energy_status"] = INCONSISTENT
+			nvml["status"] = INCONSISTENT
 	powercap = discover_powercap_zones()
 	amd = discover_amd_hwmon_zones()
 	raw_zones = powercap + amd
 	zones = [probe_zone(z, settle=settle) for z in raw_zones]
 	verdict = boundary_verdict(nvml, zones)
 	resolution = (probe_nvml_resolution(samples=resolution_samples)
-	              if nvml.get("cumulative_energy_status") == SUPPORTED
+	              if nvml.get("cumulative_energy_status") in (SUPPORTED, INCONSISTENT)
 	              else {"status": UNAVAILABLE, "detail": "no GPU energy counter"})
 
 	# Legacy identifier: reports generated before the project framing was made
@@ -376,6 +561,11 @@ def build_report(settle=0.5, resolution_samples=3000):
 			"psys is excluded because it is a platform domain that contains package.",
 			"A domain reported UNAVAILABLE must remain null downstream, never zero.",
 			"CodeCarbon is not independent validation: it reads NVML and RAPL itself.",
+			"An advancing GPU energy counter is cross-checked against the integral "
+			"of sampled board power; a counter that disagrees grossly is reported "
+			"INCONSISTENT and contributes no GPU energy to the boundary.",
+			"Sampled power is a diagnostic plausibility yardstick only. It is never "
+			"reported as measured energy and never substituted for a counter.",
 		],
 	}
 
@@ -425,6 +615,17 @@ def render(report):
 		         f"   advancing={d.get('energy_advancing')}")
 		L.append(f"      instantaneous power {d.get('power_status')}"
 		         f"   {d.get('power_w')} W")
+	cons = gpu.get("counter_consistency")
+	if cons:
+		L.append(f"   counter consistency  {cons.get('verdict')}")
+		if cons.get("ratio") is not None:
+			L.append(f"      counter {cons['counter_energy_j']:.3f} J vs sampled "
+			         f"{cons['sampled_energy_j']:.3f} J over "
+			         f"{cons['elapsed_s']:.2f} s"
+			         f"   ratio={cons['ratio']:.3f}x"
+			         f"   rel_diff={cons['relative_difference_pct']:.1f}%"
+			         f"   tol={cons['tolerance_j']:.3f} J")
+		L.append(f"      -> {cons.get('detail')}")
 	res = report["gpu_counter_resolution"]
 	if res.get("status") == SUPPORTED:
 		L.append(f"   counter resolution  median update "
@@ -481,11 +682,15 @@ def main():
 	                help="seconds between counter reads when probing")
 	ap.add_argument("--resolution-samples", type=int, default=3000,
 	                help="polls used to characterize NVML counter update rate")
+	ap.add_argument("--consistency-window", type=float, default=CONSISTENCY_WINDOW_S,
+	                help="seconds spent cross-checking the GPU energy counter "
+	                     "against integrated sampled power (0 disables)")
 	ap.add_argument("--quiet", action="store_true", help="suppress the text report")
 	args = ap.parse_args()
 
 	report = build_report(settle=args.settle,
-	                      resolution_samples=args.resolution_samples)
+	                      resolution_samples=args.resolution_samples,
+	                      consistency_window_s=args.consistency_window)
 	if not args.quiet:
 		print(render(report))
 	if args.json:

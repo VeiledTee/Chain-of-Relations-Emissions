@@ -22,6 +22,9 @@ import os
 
 SUPPORTED = "SUPPORTED"
 UNREADABLE = "UNREADABLE"
+#: Counter is present and advancing, but its values are not physically
+#: credible (see validation.assess_counter_consistency). Never additive.
+INCONSISTENT = "INCONSISTENT"
 UNAVAILABLE = "UNAVAILABLE"
 UNKNOWN = "UNKNOWN"
 
