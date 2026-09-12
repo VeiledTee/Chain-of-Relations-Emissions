@@ -143,6 +143,110 @@ Set `MODEL_REVISION` alongside `MODEL_NAME` — a run without it is a validation
 run, not a citable measurement. Artifacts land in `measurement/runs/<tag>/`;
 see [Profiler outputs](../README.md#profiler-outputs).
 
+### Figures
+
+`measurement/visualize.py` (implementation: `agent_energy_profiler/visualize.py`)
+draws standard figures for any paradigm that emits schema v1. A run directory is
+recognised by its `events_attributed.jsonl`; `trajectory_summary.json` is
+optional and only the whole-question-counter plots need it. Start with `--list`:
+
+```bash
+python measurement/visualize.py --list --run measurement/runs/<run>
+python measurement/visualize.py --plot operation-energy --run measurement/runs/<run> --out <dir>
+python measurement/visualize.py --plot semantic-flow --run measurement/runs/<run> --out <dir>
+python measurement/visualize.py --plot question-energy \
+  --run CoR=<cor-run> --run ToG=<tog-run> --run PoG=<pog-run> --out <dir>
+python measurement/visualize.py --plot energy-vs --x output_tokens --run <run> --out <dir>
+python measurement/visualize.py --plot outcome-energy --run <run> --out <dir>
+python measurement/visualize.py --plot fallback-split --run <run> --out <dir>
+```
+
+Each figure is written as PNG, PDF and a CSV of exactly the values drawn (plus
+`_stats.csv` or `_per_question.csv` where summary values are involved).
+`--out` must lie outside every run directory. `--domain` selects the energy
+domain (default `gpu_energy_j`); an unmeasured domain is refused, not drawn as
+zero. Exit codes: 0 ok, 2 invalid request or unavailable domain, 3 plot not
+applicable to the data.
+
+Energy is always on the y-axis: operation bars are vertical, the question
+distribution is drawn as cumulative fraction of questions (x) against energy
+(y), and workload and outcome variables go on x. `--y-limits LOW,HIGH` fixes
+the energy axis so figures of different runs can be compared on one scale.
+`semantic-flow` has no energy axis (energy is ribbon thickness).
+
+| Plot | Energy basis |
+|---|---|
+| `operation-energy` | attributed event energy; `--unit percent` = share of the run's total attributed event energy; the `<unattributed>` residual goes to the CSV and terminal, drawn only with `--include-unattributed` |
+| `question-energy`, `energy-vs`, `outcome-energy` | `--basis trajectory` (default): whole-question counter, independent windows only; `--basis attributed`: summed event energy |
+| `fallback-split` | attributed event energy, split at the fallback-marked event |
+| `semantic-flow` | attributed event energy, one run per figure |
+
+`semantic-flow` draws attributed energy → operation type → semantic label as a
+left-to-right flow whose widths are proportional to energy. Each label's parent
+is the `operation_type` recorded on its events, never inferred from the label's
+name; a label recorded under two types appears once under each. Percentages at
+every level are shares of the run's total attributed event energy, and the
+hierarchy must reconcile (labels sum to their type, types to the total) before
+it is drawn. The flow is rooted at attributed energy, so the `<unattributed>`
+residual (trajectory minus attributed) is reported in the CSV and terminal but
+never drawn. Each operation type's colour comes from a hash of its own name, so
+it stays the same across runs and figures; with a fixed palette two types can
+share a colour, which the terminal output reports.
+
+Fallback is read from the schema convention only: a trajectory is a fallback
+trajectory when one of its events carries `meta.fallback=true` or a
+`meta.fallback_reason`, and that event is the fallback operation. Example: in
+the current CoR implementation, a closed-book fallback happens when graph search
+ends without an accepted graph answer; the code then invokes
+`llm:direct_answer`, whose prompt contains the question but not the retrieved
+graph evidence. That event carries `meta.fallback=true` and
+`meta.fallback_reason=no_graph_answer`, which is all the visualizer reads.
+
+`max_iteration` and `max_traversal_depth` are each paradigm's own counters and
+are not comparable across paradigms.
+
+### Colouring a figure by per-question annotations
+
+`energy-vs` can colour each question by an external annotation, which keeps
+dataset-specific scoring out of the profiler:
+
+```bash
+python measurement/export_outcomes.py \
+  --predictions results/cor/webqsp/gemma-3-4b-it/predict.jsonl \
+  --dataset webqsp --run CoR --out outcomes_cor.csv
+
+python measurement/visualize.py --plot energy-vs --x output_tokens \
+  --run CoR=measurement/runs/<run> --annotations outcomes_cor.csv --color-by outcome \
+  --category-order hit,miss \
+  --category-labels 'hit=Gold answer found,miss=Gold answer not found' \
+  --category-colors 'hit=#0ca30c,miss=#d03b3b' --category-markers 'hit=o,miss=^' --out <dir>
+```
+
+The annotation file needs a `question_id` column, optionally a `run` column, and
+the column named by `--color-by`. To the visualizer the values are opaque
+strings: it knows nothing of WebQSP, Hit@1 or any paradigm. Questions absent
+from the file are drawn grey as `unannotated` and never join a category, and
+correlations are reported per category in the stats CSV.
+
+### Rebuilding the comparable per-system figures
+
+```bash
+python measurement/make_comparable_figures.py --out ~/webqsp_supervisor_summary
+```
+
+Draws Figures 1-5 (operation energy, question distribution, outcome-coloured
+trajectory properties, outcome + fallback split in one image, semantic flow) for
+each system on shared axis limits, writes the plotted-data CSVs and a checks
+log, and modifies no run artifact. It defaults to the three WebQSP Gemma-3-4B
+runs in `measurement/runs/`; override with `--run NAME=DIR` and
+`--predictions NAME=FILE`.
+
+Legacy tools: `measurement/compare_runs.py`, `measurement/results_grid.py` and
+`measurement/pareto_plot.py` still read the pre-schema-v1 `gpu_j` column of
+`energy_summary.csv` and fail with `KeyError: 'gpu_j'` on schema-v1 runs. They
+have not been migrated; use `visualize.py` or `agent_energy_profiler.aggregate`
+for schema-v1 runs.
+
 ---
 
 ## Operational rules
