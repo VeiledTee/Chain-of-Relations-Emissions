@@ -20,10 +20,12 @@ Four layers, kept separate on purpose:
     3. attribution.py  joins 1 and 2                  -> events_attributed.jsonl
     4. trajectory.py   reconciliation and coverage    -> trajectory_summary.*
     5. aggregate.py    long-format rollups            -> plotting-ready tables
+    6. visualize.py    standard figures               -> PNG / PDF / plotted-data CSV
 
-Layer 5 is derived: it never re-measures anything, and refuses to report a
-share, a residual or a total it cannot defend from layers 1-4. Plotting lives
-outside this package.
+Layers 5 and 6 are derived: they never re-measure anything, and refuse to
+report a share, a residual or a total they cannot defend from layers 1-4.
+visualize.py imports matplotlib only when it draws, so the package itself still
+has no required dependency.
 
 Measurement boundary, enforced identically at every layer:
 
@@ -64,7 +66,7 @@ __version__ = "0.1.0"
 #: submodule is loaded, never which names exist.
 _SUBMODULES = frozenset({
 	"aggregate", "attribution", "carbon", "events", "labels", "profiler",
-	"schema", "trajectory",
+	"schema", "trajectory", "visualize",
 })
 
 #: Values re-exported from submodules, resolved the same way.
@@ -76,7 +78,8 @@ _REEXPORTS = {
 
 __all__ = [
 	"aggregate", "attribution", "carbon", "events", "labels", "profiler",
-	"schema", "trajectory", "span", "SCHEMA_VERSION", "Status", "__version__",
+	"schema", "trajectory", "visualize", "span", "SCHEMA_VERSION", "Status",
+	"__version__",
 ]
 
 

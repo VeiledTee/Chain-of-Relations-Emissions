@@ -20,12 +20,15 @@ dependencies = []
 # `pynvml` distribution wraps it and emits a FutureWarning on import; do not
 # install both, since they claim the same module name.
 gpu = ["nvidia-ml-py>=12.535"]
+# Figures (agent_energy_profiler.visualize). Imported only when drawing.
+plot = ["matplotlib>=3.5"]
 
 [project.scripts]
 aep-sample = "agent_energy_profiler.sampling:main"
 aep-attribute = "agent_energy_profiler.attribution:main"
 aep-validate = "agent_energy_profiler.validation:main"
 aep-aggregate = "agent_energy_profiler.aggregate:main"
+aep-visualize = "agent_energy_profiler.visualize:main"
 
 [tool.setuptools]
 # Only the profiler is packaged. The host agents (chain_of_relations) and the

@@ -731,6 +731,7 @@ Source: `trajectory_summary.csv` joined to answer scoring on `question_id`.
 | `measurement/attribute.py` | Joins timelines; writes attributed events + summaries |
 | `measurement/trajectory.py` | Trajectory accounting and overlap detection |
 | `measurement/analyze.py` | Derived tables and figures |
+| `measurement/visualize.py` | Paradigm-agnostic figures (PNG/PDF + plotted-data CSV) from attributed events and trajectory summaries |
 | `measurement/measure_run.py` | Measured-run orchestrator |
 | `tests/test_energy_measurement.py` | Frozen schema-v1 contract tests |
 | `tests/test_hardware_validation.py` | Capability, classification and accounting tests |
@@ -754,6 +755,7 @@ agent_energy_profiler             ->  chain_of_relations        FORBIDDEN
 | Attribution | `agent_energy_profiler/attribution.py` | `measurement/attribute.py` |
 | Trajectory accounting | `agent_energy_profiler/trajectory.py` | `measurement/trajectory.py` |
 | Long-format rollups | `agent_energy_profiler/aggregate.py` | — |
+| Figures | `agent_energy_profiler/visualize.py` | `measurement/visualize.py` |
 | Capability probe | `agent_energy_profiler/validation.py` | `measurement/validate_hardware.py` |
 | Counter access | `agent_energy_profiler/hardware/{nvml,rapl,discovery}.py` | — |
 | Joules -> CO2e | `agent_energy_profiler/carbon.py` | — |
