@@ -17,7 +17,9 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from chain_of_relations.eval import webqsp_canonical
 from chain_of_relations.eval.accuracy import eval_f1, eval_hit
+from chain_of_relations.eval.webqsp_canonical import CANONICAL_DATASETS
 
 try:
 	import matplotlib.pyplot as plt
@@ -206,6 +208,11 @@ def evaluate_distribution(result_dir: Path, dataset: str) -> dict:
 
 	token_by_id, calls_by_id = build_llm_cost_index(result_dir)
 
+	# WebQSP scores canonically, against every official parse, so this plot's
+	# hit/F1 agree with the evaluator and with measurement/export_outcomes.py.
+	canonical_gold = (webqsp_canonical.load_gold()
+	                  if str(dataset or "").strip().lower() in CANONICAL_DATASETS else None)
+
 	cumulative_hit = 0
 	cumulative_f1 = 0.0
 	cumulative_calls = 0
@@ -218,10 +225,15 @@ def evaluate_distribution(result_dir: Path, dataset: str) -> dict:
 		prediction, gold = parse_prediction(row, dataset)
 		prediction_str = " ".join(prediction)
 
-		hit = eval_hit(prediction_str, gold) if gold else 0
-		if gold:
+		if canonical_gold is not None:
+			scored = webqsp_canonical.score_prediction(
+				prediction, webqsp_canonical.parses_for(str(row.get("id", "")), canonical_gold))
+			hit, f1 = scored["hit"], scored["f1"]
+		elif gold:
+			hit = eval_hit(prediction_str, gold)
 			f1, _, _ = eval_f1(prediction, gold)
 		else:
+			hit = 0
 			f1 = 0.0
 
 		sample_id = str(row.get("id", "")).strip()

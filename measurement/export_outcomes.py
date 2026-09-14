@@ -10,11 +10,20 @@ opaque category strings through --annotations / --color-by.
         --dataset webqsp --out outcomes_cor.csv [--run CoR]
 
 Columns: question_id, run, outcome, hit1, f1, precision, recall, accuracy,
-n_gold_answers, n_prediction_items, action.
+n_gold_answers, n_prediction_items, action, empty_gold, n_parses, best_parse_id.
 
-outcome is `hit` when the evaluator's Hit@1 is 1, `miss` when it is 0, and
-`unscored` when the question carries no gold answer (the evaluator skips those,
-so they are never counted as wrong).
+WebQSP is scored canonically: best F1 over the official parses and Hit@1 against
+any parse, via chain_of_relations.eval.webqsp_canonical. The gold set therefore
+comes from datasets/webqsp/webqsp_official_gold.json, NOT from the `gold_answer`
+field copied into predict.jsonl, which holds only `Parses[0]` and understates F1
+on multi-parse questions.
+
+`outcome` is `hit` when Hit@1 is 1 and `miss` when it is 0, for all 1,639 WebQSP
+questions -- the 11 official empty-gold questions included, which is how the
+official evaluator and ToG/PoG count them. `empty_gold` marks those 11 so an
+analysis that needs usable gold can select the 1,628 subset and say it did.
+`unscored` survives only for non-WebQSP datasets whose evaluator divides by zero
+on a question with no gold answer.
 """
 
 import argparse
@@ -25,13 +34,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from chain_of_relations.eval import webqsp_canonical  # noqa: E402
 from chain_of_relations.eval.accuracy import eval_acc, eval_f1, eval_hit  # noqa: E402
 from chain_of_relations.eval.eval import (  # noqa: E402
 	extract_answer_from_braces, postprocess_prediction_for_dataset)
 
 HIT, MISS, UNSCORED = "hit", "miss", "unscored"
 FIELDS = ("question_id", "run", "outcome", "hit1", "f1", "precision", "recall", "accuracy",
-          "n_gold_answers", "n_prediction_items", "action")
+          "n_gold_answers", "n_prediction_items", "action", "empty_gold", "n_parses",
+          "best_parse_id")
+#: Datasets scored with the canonical multi-parse rule (defined in the evaluator).
+CANONICAL_DATASETS = webqsp_canonical.CANONICAL_DATASETS
 
 
 def prediction_items(record, dataset, gold):
@@ -46,8 +59,57 @@ def prediction_items(record, dataset, gold):
 	return postprocess_prediction_for_dataset(dataset, items or ["None"], gold)
 
 
+def _canonical_row(record, dataset, run_label, gold_index):
+	"""One row scored against every official parse (best F1, any-parse Hit@1)."""
+	question_id = record["id"]
+	parses = webqsp_canonical.parses_for(question_id, gold_index)
+	# Post-processing is gold-dependent for numeric datasets only; the local
+	# gold list is the right shape for it and never reaches the score itself.
+	local_gold = [a["name"] for a in record.get("gold_answer", []) if "name" in a]
+	items = prediction_items(record, dataset, local_gold)
+	scored = webqsp_canonical.score_prediction(items, parses)
+	best_names = (webqsp_canonical.parse_answer_names(parses[scored["best_parse_index"]])
+	              if scored["best_parse_index"] is not None else [])
+	return {
+		"question_id": question_id, "run": run_label,
+		"outcome": HIT if scored["hit"] == 1 else MISS,
+		"hit1": scored["hit"], "f1": scored["f1"],
+		"precision": scored["precision"], "recall": scored["recall"],
+		"accuracy": eval_acc(" ".join(items), best_names) if best_names else 0.0,
+		"n_gold_answers": len(best_names), "n_prediction_items": len(items),
+		"action": record.get("action", ""), "empty_gold": scored["empty_gold"],
+		"n_parses": scored["n_parses"], "best_parse_id": scored["best_parse_id"],
+	}
+
+
+def _legacy_row(record, dataset, run_label):
+	"""Pre-canonical scoring, still used by datasets with no parse-level gold."""
+	gold = [a["name"] for a in record.get("gold_answer", []) if "name" in a]
+	items = prediction_items(record, dataset, gold)
+	joined = " ".join(items)
+	try:
+		f1, precision, recall = eval_f1(items, gold)
+		accuracy, hit = eval_acc(joined, gold), eval_hit(joined, gold)
+		outcome = HIT if hit == 1 else MISS
+	except BaseException:
+		# No gold answers: the evaluator divides by zero and skips the question.
+		f1 = precision = recall = accuracy = hit = None
+		outcome = UNSCORED
+	return {"question_id": record["id"], "run": run_label, "outcome": outcome,
+	        "hit1": hit, "f1": f1, "precision": precision, "recall": recall,
+	        "accuracy": accuracy, "n_gold_answers": len(gold),
+	        "n_prediction_items": len(items), "action": record.get("action", ""),
+	        "empty_gold": not gold, "n_parses": "", "best_parse_id": ""}
+
+
 def score(predictions_path, dataset, run_label=""):
-	"""One row per question, scored exactly as chain_of_relations.eval.eval does."""
+	"""One row per question.
+
+	WebQSP uses the canonical multi-parse rule; every other dataset keeps the
+	single-gold-list scoring it had.
+	"""
+	canonical = str(dataset or "").strip().lower() in CANONICAL_DATASETS
+	gold_index = webqsp_canonical.load_gold() if canonical else None
 	rows = []
 	with open(predictions_path) as f:
 		for line in f:
@@ -55,21 +117,8 @@ def score(predictions_path, dataset, run_label=""):
 			if not line:
 				continue
 			record = json.loads(line)
-			gold = [a["name"] for a in record.get("gold_answer", []) if "name" in a]
-			items = prediction_items(record, dataset, gold)
-			joined = " ".join(items)
-			try:
-				f1, precision, recall = eval_f1(items, gold)
-				accuracy, hit = eval_acc(joined, gold), eval_hit(joined, gold)
-				outcome = HIT if hit == 1 else MISS
-			except BaseException:
-				# No gold answers: the evaluator divides by zero and skips the question.
-				f1 = precision = recall = accuracy = hit = None
-				outcome = UNSCORED
-			rows.append({"question_id": record["id"], "run": run_label, "outcome": outcome,
-			             "hit1": hit, "f1": f1, "precision": precision, "recall": recall,
-			             "accuracy": accuracy, "n_gold_answers": len(gold),
-			             "n_prediction_items": len(items), "action": record.get("action", "")})
+			rows.append(_canonical_row(record, dataset, run_label, gold_index) if canonical
+			            else _legacy_row(record, dataset, run_label))
 	return rows
 
 
@@ -92,8 +141,10 @@ def main(argv=None):
 	rows = score(args.predictions, args.dataset, args.run)
 	write_csv(rows, args.out)
 	counts = {k: sum(1 for r in rows if r["outcome"] == k) for k in (HIT, MISS, UNSCORED)}
+	empty = sum(1 for r in rows if r.get("empty_gold"))
 	print(f"{args.out}: {len(rows):,} questions  " +
-	      "  ".join(f"{k}={v:,}" for k, v in counts.items()))
+	      "  ".join(f"{k}={v:,}" for k, v in counts.items()) +
+	      f"  empty_gold={empty:,}")
 	return 0
 
 

@@ -13,9 +13,15 @@ import json
 import argparse
 import os
 
+from chain_of_relations.eval import webqsp_canonical
 from chain_of_relations.eval.accuracy import eval_acc, eval_f1, eval_hit
 from chain_of_relations.eval.faithfulness import sorted_knowledge_distribution, update_knowledge_distribution
 from chain_of_relations.eval.efficiency import analyze_detailed_results
+
+
+#: Re-exported so callers can ask "is this dataset scored canonically?" without
+#: reaching past the evaluator. Defined once in webqsp_canonical.
+CANONICAL_DATASETS = webqsp_canonical.CANONICAL_DATASETS
 
 
 def load_predictions(output_file):
@@ -112,6 +118,16 @@ if __name__ == '__main__':
     # Analyze detailed results for LLM statistics
     llm_stats = analyze_detailed_results(result_dir)
 
+    # WebQSP is scored canonically, against every official parse. Every other
+    # dataset keeps the single-gold-list scoring it already had.
+    canonical_gold = (webqsp_canonical.load_gold()
+                      if str(args.dataset or "").strip().lower() in CANONICAL_DATASETS else None)
+    empty_gold_ids = []
+    skipped_ids = []
+    missing_gold_ids = []
+    usable_f1_list = []
+    usable_hit_list = []
+
     acc_list = []
     hit_list = []
     f1_list = []
@@ -156,17 +172,42 @@ if __name__ == '__main__':
         predict_type = pred_data.get("action", "unknown")
         update_knowledge_distribution(knowledge_distribution, predict_type)
 
-        try:
-            f1_score, precision_score, recall_score = eval_f1(prediction, answer)
-        except BaseException as e:
-            print(f"Error: {e}, {pred_data['id']}")
-            continue
+        if canonical_gold is not None:
+            # Canonical WebQSP: best F1 over the official parses, Hit@1 against
+            # any parse. `answer` above holds only Parses[0] and is not scored.
+            parses = webqsp_canonical.parses_for(pred_data["id"], canonical_gold)
+            if not parses:
+                missing_gold_ids.append(pred_data["id"])
+            elif not webqsp_canonical.evaluable(parses):
+                # The official evaluator skips a question with no Good+Complete
+                # parse. No such question exists in the 1,639-question test set;
+                # if a future gold release introduces one, skip it and say so.
+                skipped_ids.append(pred_data["id"])
+                continue
+            scored = webqsp_canonical.score_prediction(prediction, parses)
+            f1_score = scored["f1"]
+            precision_score, recall_score = scored["precision"], scored["recall"]
+            hit = scored["hit"]
+            best_names = (webqsp_canonical.parse_answer_names(parses[scored["best_parse_index"]])
+                          if scored["best_parse_index"] is not None else [])
+            acc = eval_acc(prediction_str, best_names) if best_names else 0.0
+            if scored["empty_gold"]:
+                empty_gold_ids.append(pred_data["id"])
+            else:
+                usable_f1_list.append(f1_score)
+                usable_hit_list.append(hit)
+        else:
+            try:
+                f1_score, precision_score, recall_score = eval_f1(prediction, answer)
+            except BaseException as e:
+                print(f"Error: {e}, {pred_data['id']}")
+                continue
+            acc = eval_acc(prediction_str, answer)
+            hit = eval_hit(prediction_str, answer)
+
         f1_list.append(f1_score)
         precission_list.append(precision_score)
         recall_list.append(recall_score)
-
-        acc = eval_acc(prediction_str, answer)
-        hit = eval_hit(prediction_str, answer)
         acc_list.append(acc)
         hit_list.append(hit)
 
@@ -184,6 +225,20 @@ if __name__ == '__main__':
     print(f"Precision: {sum(precission_list) * 100 / len(precission_list):.2f}%")
     print(f"Recall: {sum(recall_list) * 100 / len(recall_list):.2f}%")
     print(f"Accuracy: {sum(acc_list) * 100 / len(acc_list):.2f}%")
+    if canonical_gold is not None:
+        print(f"\nScoring: canonical WebQSP - best F1 over the official parses, "
+              f"Hit@1 over any parse, {len(f1_list)} questions in the denominator.")
+        if missing_gold_ids:
+            print(f"  WARNING: {len(missing_gold_ids)} question(s) absent from the parse-level "
+                  f"gold, scored as empty gold: {missing_gold_ids[:5]}")
+        if skipped_ids:
+            print(f"  Skipped, no Good+Complete parse: {len(skipped_ids)} -> {skipped_ids[:5]}")
+        if usable_f1_list:
+            print(f"  Non-empty-gold subset: {len(usable_f1_list)} questions, excludes "
+                  f"{len(empty_gold_ids)} official empty-gold questions -> "
+                  f"Hit@1 {sum(usable_hit_list) * 100 / len(usable_hit_list):.2f}%  "
+                  f"F1 {sum(usable_f1_list) * 100 / len(usable_f1_list):.2f}%")
+            print("  Headline WebQSP numbers are the full-denominator ones above.")
     print("\nAction Distribution:")
     for action, count in sorted_knowledge_distribution(knowledge_distribution):
         print(f"  {action}: {count} ({count*100/total_data:.2f}%)")

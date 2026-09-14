@@ -94,7 +94,16 @@ python -m chain_of_relations.eval.eval --dataset cwq    --output_dir results/cor
 engineering baselines for reproducing the harness, **not study results**:
 WebQSP F1 62.00 / Hit 73.83, fallback 12.4%. CWQ F1 32.97 / Hit 39.20, fallback 30.0%,
 6 questions overflow native 32K at depth 4. Paper (gpt-4.1-mini): 74.9 / 52.1.
-11 WebQSP qids have empty gold lists (division-by-zero) — dataset rot, document.
+11 WebQSP qids have empty gold lists. This is **not** dataset rot on our side:
+those 11 questions carry `"Answers": []` in the official Microsoft release
+itself (`WebQSP.test.json`, sha256 `856f50eb…`), each with a complete semantic
+parse; 7 of them are time-sensitive questions whose annotation window returned
+nothing. The common 1,628-question convention — `rmanluo/RoG-webqsp` and the
+SubgraphRAG / GCR line built on it — is exactly the official 1,639 minus those
+same 11 ids. ToG and PoG keep all 1,639 and score the 11 as errors, so our
+headline WebQSP numbers use the full 1,639 denominator and do the same; an
+analysis conditioned on usable gold may report the 1,628 subset as long as it
+says so. See `chain_of_relations/eval/webqsp_canonical.py`.
 
 The corresponding rehearsal energy artifacts are in
 `measurement/runs/cor_{webqsp,cwq}_qwen7b/`. They predate schema v1 (events
