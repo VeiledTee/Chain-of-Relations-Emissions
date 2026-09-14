@@ -287,7 +287,13 @@ before quoting any number:
 |---|---|---|
 | `cor_{webqsp,cwq}_qwen7b`, `cot_*`, `io_*` | Rehearsal — Qwen2.5-7B engineering shakedown, pre-schema-v1 (legacy `category`/`label` keys), captured without RAPL | No |
 | `gemma4b_val_*`, `gemma4b_v2_*`, `gemma4b_v3_*`, `gemma4b_v4_*` | Profiler / integration validation — real `google/gemma-3-4b-it` inference on the WSL2 development host, `run_size 3`, `measurement_complete == false` | No |
+| `{cor,tog,pog}_<dataset>_gemma4b_<MMDD>_<HHMM>` | Full-dataset paradigm comparison on the WSL2 development host — real inference, GPU-only, `measurement_complete == false` | No |
+| `smoke_*` | Throwaway one-question shakedowns | No |
 | (not yet produced) | Final experiments — Gemma 3 matrix on a bare-metal host that passes the capability probe | Yes, once produced |
+
+`measurement/runs/` and `results/` are git-ignored, so a fresh clone contains no
+runs and no predictions: the tags above exist only on the machine that produced
+them. Analysis commands that name a run directory assume you have it locally.
 
 Anything whose `hardware_id` names the development host is a validation run by
 construction: CPU-package and DRAM are unavailable there, so

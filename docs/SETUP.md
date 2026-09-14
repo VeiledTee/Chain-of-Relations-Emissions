@@ -111,8 +111,23 @@ docker logs -f freebase-virtuoso                           # wait for server onl
 curl -s "http://localhost:8890/sparql" \
   --data-urlencode "query=SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }" \
   --data-urlencode "format=application/json" | grep -o '"value": "[0-9]*"'
-# MUST return: "value": "3124793702"  — same artifact as rehearsal tier.
+# Expect ~3.12e9. Do NOT treat the exact total as a pass/fail invariant:
+# it counts Virtuoso's own system graphs as well as the data. This deployment
+# reported 3124793702 in 2026-07 and 3124793701 in 2026-09 with the dataset
+# unchanged — the difference is one triple in a system graph, not in Freebase.
+#
+# The data graph is the number worth asserting (stable across both dates):
+curl -s "http://localhost:8890/sparql" \
+  --data-urlencode "query=SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://freebase.com> { ?s ?p ?o } }" \
+  --data-urlencode "format=application/json" | grep -o '"value": "[0-9]*"'
+# Expect: "value": "3124791155"  — the loaded Freebase dump.
 ```
+
+The image tag above is unpinned (`openlink/virtuoso-opensource-7:latest`), so
+system-graph contents can differ between pulls. `scripts/run_experiments.sh`
+therefore checks that the endpoint answers, and asserts a triple count only when
+you set `EXPECTED_TRIPLES` (counted against `FREEBASE_GRAPH`, default
+`http://freebase.com`).
 
 ## vLLM server (Terminal 1 / tmux session `vllm`)
 
@@ -121,6 +136,16 @@ tmux new -s vllm
 python3 -m venv ~/.venv-vllm && source ~/.venv-vllm/bin/activate
 pip install --upgrade pip && pip install "vllm==0.11.1"     # pinned: ML.ENERGY lineage
 pip install "flashinfer-cubin==0.5.2" || export FLASHINFER_DISABLE_VERSION_CHECK=1
+
+# REQUIRED on this host, in the shell that starts vLLM. vllm==0.11.1 pins
+# flashinfer 0.5.2 while flashinfer-cubin resolves to 0.6.13, and FlashInfer
+# refuses the mismatched pair:
+#   RuntimeError: flashinfer-cubin version (0.6.13) does not match
+#                 flashinfer version (0.5.2).
+# The engine then aborts with "Engine core initialization failed" and vLLM
+# never binds the port. Only the version assertion fails; the kernels work.
+# Pinning flashinfer-cubin==0.5.2 (the line above) removes the need for it.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 vllm serve Qwen/Qwen2.5-7B-Instruct --host 0.0.0.0 --port 8000 \
   --dtype bfloat16 --max-model-len 32768 --max-num-seqs 1 \
@@ -132,6 +157,14 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --host 0.0.0.0 --port 8000 \
 ```bash
 curl -s http://localhost:8000/v1/models | grep -o '"id":"[^"]*"'   # exact model name
 curl -s http://localhost:8000/v1/models | grep -o '"max_model_len":[0-9]*'  # 32768
+
+# The model list is NOT proof the server works. A wedged engine kept serving
+# /v1/models while every completion hung (5 tokens, 120s timeout, GPU at 100%).
+# Require a completed generation:
+curl -s --max-time 60 http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"Say OK"}],"max_tokens":5}' \
+  | grep -o '"content":"[^"]*"'
 ```
 
 ## Harness (Terminal 2 / tmux session `run`)

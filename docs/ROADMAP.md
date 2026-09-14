@@ -34,7 +34,9 @@ provides.
 
 This codebase is the common experimental harness for three agentic KGQA
 paradigms, all running against the same self-hosted Freebase instance
-(≈ **3.12 billion triples**, verified as `3124793702`), one model-serving
+(≈ **3.12 billion triples**; the data graph `<http://freebase.com>` holds
+`3124791155`, and the default-graph total also counts Virtuoso system graphs,
+so it is not an exact invariant), one model-serving
 stack, one measurement procedure and one hardware platform — so an observed
 difference is a property of the paradigm, not of the setup.
 
@@ -263,7 +265,9 @@ eligible for final measurements**.
 
 Additionally, **real local LLM / vLLM inference has been exercised only on the
 development host.** Real `google/gemma-3-4b-it` runs through vLLM exist
-(`measurement/runs/gemma4b_*`), which confirms token-field attribution and LLM
+(`measurement/runs/gemma4b_*` and the full-dataset
+`measurement/runs/{cor,tog,pog}_webqsp_gemma4b_*`), which confirms token-field
+attribution and LLM
 event boundaries under genuine inference — but on a host where CPU-package and
 DRAM are unavailable, so those runs are integration validation, not measurement.
 Real inference must still be validated on the experimental node before the

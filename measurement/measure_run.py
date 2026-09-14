@@ -87,6 +87,28 @@ def refuse_tag_reuse(outdir, tag):
 	sys.exit(2)
 
 
+#: Floor on the post-run settle, so even a fast sampler covers the tail.
+MIN_SAMPLER_SETTLE_S = 1.0
+
+
+def sampler_settle_seconds(hz):
+	"""How long to keep sampling after the run process exits.
+
+	The run process writes an event's `end_timestamp` as that event finishes,
+	so the last event of a run can end a few milliseconds AFTER the sampler's
+	final tick. Attribution refuses a run with an event outside hardware
+	coverage — correctly, since it will not fabricate energy — so stopping the
+	sampler the instant the child exits made every short measured run
+	unattributable. Waiting at least two sample periods guarantees a sample
+	after the final event, and mirrors the baseline settle before the run.
+	"""
+	try:
+		period = 1.0 / float(hz)
+	except (TypeError, ValueError, ZeroDivisionError):
+		period = 0.0
+	return max(2.0 * period, MIN_SAMPLER_SETTLE_S)
+
+
 def main():
 	ap = argparse.ArgumentParser()
 	ap.add_argument("--tag", required=True)
@@ -144,6 +166,8 @@ def main():
 			tracker.stop()
 		except Exception:
 			pass
+	# Keep sampling past the run's last event: see sampler_settle_seconds.
+	time.sleep(sampler_settle_seconds(args.hz))
 	logger.send_signal(signal.SIGTERM)
 	logger.wait(timeout=10)
 

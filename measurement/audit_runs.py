@@ -47,7 +47,11 @@ def load_power(path):
 	for r in rdr:
 		try:
 			ti = float(r["t"])
-			pi = sum(float(r[c]) for c in r if c != "t")
+			# Watt columns only. power.csv also carries cumulative counter
+			# columns (`*_energy_mj`); summing those in treated a millijoule
+			# counter as instantaneous power and reported ~1e10 W with a
+			# counter/integral ratio of 0.000 on every schema-v1 run.
+			pi = sum(float(r[c]) for c in r if c and c.endswith("_w"))
 		except (TypeError, ValueError):
 			bad += 1
 			continue

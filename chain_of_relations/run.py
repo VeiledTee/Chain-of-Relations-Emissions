@@ -295,6 +295,16 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--remove_unnecessary_rel", type=str2bool, default=True)
 	parser.add_argument("--save_detail", type=str2bool, default=True)
 	parser.add_argument(
+		"--output_dir",
+		type=str,
+		default="",
+		help=(
+			"write predict.jsonl, param.json and detail JSONs here instead of "
+			"results/<method>/<dataset>/<model>. Use it for smoke runs so they "
+			"cannot append to or resume from a real experiment's predictions."
+		),
+	)
+	parser.add_argument(
 		"--log_level",
 		type=str,
 		default="INFO",
@@ -430,7 +440,11 @@ def main() -> None:
 		raise SystemExit(1)
 
 	model_dirname = model_name_to_dirname(model_name, openai_base_url)
-	output_dir = str(PROJECT_ROOT / "results" / args.method / args.dataset / model_dirname)
+	# --output_dir keeps a smoke or throwaway run out of the real results tree:
+	# without it every run of the same method/dataset/model shares one
+	# predict.jsonl, so a one-question run appends to a finished experiment.
+	output_dir = (str(Path(args.output_dir).expanduser()) if args.output_dir
+	              else str(PROJECT_ROOT / "results" / args.method / args.dataset / model_dirname))
 	output_jsonl_file = str(Path(output_dir) / "predict.jsonl")
 	param_json_file, param_created = save_param_json_if_missing(
 		output_dir=output_dir,
