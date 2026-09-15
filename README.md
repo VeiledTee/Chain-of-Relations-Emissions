@@ -408,7 +408,28 @@ python measurement/make_comparable_figures.py --out "$HOME/webqsp_supervisor_sum
 | `fig3_{sys}_trajectory_properties` | workload vs energy (output/input tokens, LLM calls, max depth), coloured by answer outcome |
 | `fig4_{sys}_outcome_and_fallback` | energy by outcome + the fallback/non-fallback split |
 | `fig5_{sys}_semantic_flow` | total → operation type → operation label energy flow |
-| `outcomes_{sys}.csv` | canonical per-question WebQSP outcomes |
+| `outcomes_{sys}.csv` | per-question outcomes from the dataset's own evaluator |
+
+**Summary tables** — the supervisor-level statistics, from the run directories
+plus those outcome CSVs. Dataset-agnostic; `--dataset` is only a label:
+
+```bash
+python measurement/summarize_comparable_runs.py \
+  --dataset cwq --out "$HOME/cwq_summary_tables" \
+  --run PoG=$POG_RUN --run ToG=$TOG_RUN --run CoR=$COR_RUN \
+  --outcomes PoG=outcomes_pog_cwq.csv \
+  --outcomes ToG=outcomes_tog_cwq.csv \
+  --outcomes CoR=outcomes_cor_cwq.csv
+```
+
+Writes `summary_overview.csv`, `summary_fallback.csv`,
+`summary_depth_outcome.csv`, `summary_fallback_reasons.csv` and `SUMMARY.md`:
+gold-found counts and rate, mean/median/p90/total GPU energy, tokens and LLM
+calls per question, top-10% energy share, energy by outcome, depth vs outcome,
+fallback rates and success, the before/in-fallback energy split, and the
+fallback-reason breakdown. Effectiveness is read from the outcome CSVs (the
+dataset's own evaluator), never recomputed; `--effectiveness CoR=43.54,62.48`
+pastes the evaluator's own aggregates instead.
 
 Custom runs, predictions and output directory:
 
@@ -444,10 +465,19 @@ done
 
 python measurement/make_comparable_figures.py --out "$HOME/webqsp_supervisor_summary"
 python measurement/audit_runs.py measurement/runs
+
+python measurement/summarize_comparable_runs.py \
+  --dataset webqsp --out "$HOME/webqsp_summary_tables" \
+  --run PoG=measurement/runs/pog_webqsp_gemma4b_0905_0856 \
+  --run ToG=measurement/runs/tog_webqsp_gemma4b_0905_0856 \
+  --run CoR=measurement/runs/cor_webqsp_gemma4b_0905_0856 \
+  --outcomes PoG="$HOME/webqsp_supervisor_summary/outcomes_pog.csv" \
+  --outcomes ToG="$HOME/webqsp_supervisor_summary/outcomes_tog.csv" \
+  --outcomes CoR="$HOME/webqsp_supervisor_summary/outcomes_cor.csv"
 ```
 
 Expect `CoR 43.54 / 62.48`, `ToG 42.10 / 57.23`, `PoG 45.79 / 57.90`
-(F1 / Hit@1), 60 files in the output directory, and every check passing.
+(F1 / Hit@1), 60 files in the figure directory, and every check passing.
 
 ---
 
