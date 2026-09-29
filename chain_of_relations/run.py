@@ -231,21 +231,27 @@ def build_step_history(prompt_history: List[Dict[str, Any]], sparql_history: Lis
 
 	base_index = len(merged)
 	for index, item in enumerate(prompt_history):
+		step = {
+			"step_type": "llm",
+			"operation_type": item.get("type", ""),
+			"prompt": item.get("prompt", ""),
+			"input_tokens": item.get("input_tokens", -1),
+			"output_tokens": item.get("output_tokens", -1),
+			"candidate_size": item.get("candidate_size", item.get("candidates_size", -1)),
+			"filtered_candidate_size": item.get("filtered_candidate_size", -1),
+			"response": item.get("response", ""),
+			"parsed_result": item.get("parsed_result", ""),
+		}
+		# pog-rank-cache audit only: absent for every other method, whose
+		# step records therefore stay exactly as before.
+		if "rank_cache" in item:
+			step["trace_id"] = item.get("trace_id")
+			step["rank_cache"] = item["rank_cache"]
 		merged.append(
 			{
 				"trace_id": item.get("trace_id"),
 				"fallback_index": base_index + index,
-				"step": {
-					"step_type": "llm",
-					"operation_type": item.get("type", ""),
-					"prompt": item.get("prompt", ""),
-					"input_tokens": item.get("input_tokens", -1),
-					"output_tokens": item.get("output_tokens", -1),
-					"candidate_size": item.get("candidate_size", item.get("candidates_size", -1)),
-					"filtered_candidate_size": item.get("filtered_candidate_size", -1),
-					"response": item.get("response", ""),
-					"parsed_result": item.get("parsed_result", ""),
-				},
+				"step": step,
 			}
 		)
 
@@ -267,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
 		"--method",
 		type=str,
 		default="tog",
-		choices=["tog", "pog", "cor", "cot_prompt", "io_prompt"],
+		choices=["tog", "pog", "pog-rank-cache", "cor", "cot_prompt", "io_prompt"],
 		help="reasoning method",
 	)
 	parser.add_argument("--dataset", type=str, default="webqsp", choices=["cwq", "webqsp", "qald10_en"])
@@ -324,6 +330,13 @@ def load_agent_class(method: str):
 		from chain_of_relations.methods.pog.agent import PoGAgent
 
 		return PoGAgent
+
+	if method == "pog-rank-cache":
+		# C2 preliminary ablation: baseline PoG + exact per-question
+		# relation_rank memoization (methods/pog_rank_cache/agent.py).
+		from chain_of_relations.methods.pog_rank_cache.agent import PoGRankCacheAgent
+
+		return PoGRankCacheAgent
 
 	if method == "cor":
 		from chain_of_relations.methods.cor.agent import CoRAgent
@@ -400,7 +413,7 @@ def main() -> None:
 				max_token=args.max_token,
 				backend=kg_backend,
 			)
-		elif args.method == "pog":
+		elif args.method in ("pog", "pog-rank-cache"):
 			agent = AgentClass(
 				model_name=model_name,
 				relation_width=relation_width,
@@ -517,6 +530,8 @@ def main() -> None:
 			"results": normalize_results(result.get("results", [])),
 			"reasoning_chains": result.get("reasoning_chains", ""),
 		}
+		if "rank_cache" in result:  # pog-rank-cache per-question audit counters
+			jsonl_item["rank_cache"] = result["rank_cache"]
 		append_jsonl(output_jsonl_file, jsonl_item)
 
 		if args.save_detail:
@@ -537,6 +552,8 @@ def main() -> None:
 				"reasoning_chains": result.get("reasoning_chains", ""),
 				"step_history": step_history,
 			}
+			if "rank_cache" in result:
+				detail["rank_cache"] = result["rank_cache"]
 			save_detail_json(detail_output, detail)
 
 		logging.info(
@@ -546,6 +563,11 @@ def main() -> None:
 
 	print("=== run_agent done ===")
 	print("output_jsonl:", output_jsonl_file)
+	rank_totals = getattr(agent, "rank_cache_run_totals", None)
+	if rank_totals:  # pog-rank-cache only: run-level totals for this process
+		lookups = rank_totals["lookups"]
+		print("rank_cache totals (this process):", dict(
+			rank_totals, hit_rate=(rank_totals["hits"] / lookups) if lookups else None))
 
 
 if __name__ == "__main__":
