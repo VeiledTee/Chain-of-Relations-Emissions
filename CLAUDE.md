@@ -535,3 +535,20 @@ At completion, provide:
 10. suggested commit message.
 
 Do not proceed to ToG/PoG or Gemma-model experiments as part of this task.
+
+---
+
+## Generated Artifact Hygiene
+
+- Keep generated outputs minimal and publication-oriented.
+- Final thesis figures: generate PDF only by default.
+- Do not generate PNG duplicates unless explicitly requested or required by another tool/workflow.
+- Diagnostic/intermediate figures may use PNG when useful.
+- Final tables: prefer CSV + TEX.
+- Do not create extra CSVs solely for validation/debugging when terminal output is sufficient.
+- Prefer extending an existing canonical summary CSV over creating multiple narrowly scoped CSVs.
+- Never delete raw experiment outputs, per-question measurements, caches required for reproducibility, or the only machine-readable copy of a result.
+- Before deleting an artifact, search the repository for references to it.
+- Avoid multiple files containing the same derived information unless each has a distinct downstream purpose.
+- Validation summaries should normally be printed to stdout rather than persisted as files.
+- When adding a new analysis artifact, ask: "Is this needed for reproducibility, publication, or a downstream script?" If none apply, do not create it.

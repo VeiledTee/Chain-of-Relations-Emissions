@@ -13,8 +13,7 @@ import json
 import argparse
 import os
 
-from chain_of_relations.eval import webqsp_canonical
-from chain_of_relations.eval.accuracy import eval_acc, eval_f1, eval_hit
+from chain_of_relations.eval import accuracy, webqsp_canonical
 from chain_of_relations.eval.faithfulness import sorted_knowledge_distribution, update_knowledge_distribution
 from chain_of_relations.eval.efficiency import analyze_detailed_results
 
@@ -37,32 +36,10 @@ def load_predictions(output_file):
             output_datas.append(data_row)
     return output_datas
 
-def extract_answer_from_braces(text):
-    """Extract answer from curly braces in ToG-style results."""
-    if not isinstance(text, str):
-        return None
-
-    # Find content within curly braces {}
-    import re
-    pattern = r'\{([^}]+)\}'
-    matches = re.findall(pattern, text)
-
-    if matches:
-        # Take the last match (usually the final answer)
-        answer_text = matches[-1].strip()
-
-        # Handle multiple answers separated by comma or "and"
-        # Split by comma or "and" and clean up
-        if ',' in answer_text:
-            answers = [a.strip() for a in answer_text.split(',')]
-        elif ' and ' in answer_text.lower():
-            answers = [a.strip() for a in re.split(r'\s+and\s+', answer_text, flags=re.IGNORECASE)]
-        else:
-            answers = [answer_text]
-
-        return answers
-
-    return None
+def prediction_answers(pred_data: dict, dataset: str, gold_answer: list) -> list:
+    """The scored answer list for one predict.jsonl row (see eval.accuracy)."""
+    prediction, _status = accuracy.extract_answers(pred_data.get("results"))
+    return postprocess_prediction_for_dataset(dataset, prediction, gold_answer)
 
 
 def is_integer_text(text: str) -> bool:
@@ -128,7 +105,6 @@ if __name__ == '__main__':
     usable_f1_list = []
     usable_hit_list = []
 
-    acc_list = []
     hit_list = []
     f1_list = []
     precission_list = []
@@ -140,33 +116,9 @@ if __name__ == '__main__':
         gold_answers = pred_data.get("gold_answer", [])
         answer = [ans["name"] for ans in gold_answers if "name" in ans]
 
-        # Extract predictions (list of names)
-        pred_results = pred_data.get("results", [])
-        if pred_results is None or len(pred_results) == 0:
-            prediction = ["None"]
-        elif isinstance(pred_results, list):
-            # Extract names from result objects
-            raw_predictions = [res["name"] for res in pred_results if isinstance(res, dict) and "name" in res]
-
-            # Check if predictions contain answers in curly braces (ToG format)
-            prediction = []
-            for raw_pred in raw_predictions:
-                extracted = extract_answer_from_braces(raw_pred)
-                if extracted:
-                    prediction.extend(extracted)
-                else:
-                    # If no braces found, use the raw prediction
-                    prediction.append(raw_pred)
-
-            if len(prediction) == 0:
-                prediction = ["None"]
-        else:
-            prediction = ["None"]
-
-        # Dataset-specific post-processing (quad2 numeric-answer samples)
-        prediction = postprocess_prediction_for_dataset(args.dataset, prediction, answer)
-
-        prediction_str = " ".join(prediction)
+        # The final answer only (JSON "answer" field or plain answer items);
+        # rationale text is never scored. See eval.accuracy.
+        prediction = prediction_answers(pred_data, args.dataset, answer)
 
         # knowledge distribution
         predict_type = pred_data.get("action", "unknown")
@@ -188,30 +140,23 @@ if __name__ == '__main__':
             f1_score = scored["f1"]
             precision_score, recall_score = scored["precision"], scored["recall"]
             hit = scored["hit"]
-            best_names = (webqsp_canonical.parse_answer_names(parses[scored["best_parse_index"]])
-                          if scored["best_parse_index"] is not None else [])
-            acc = eval_acc(prediction_str, best_names) if best_names else 0.0
             if scored["empty_gold"]:
                 empty_gold_ids.append(pred_data["id"])
             else:
                 usable_f1_list.append(f1_score)
                 usable_hit_list.append(hit)
         else:
-            try:
-                f1_score, precision_score, recall_score = eval_f1(prediction, answer)
-            except BaseException as e:
-                print(f"Error: {e}, {pred_data['id']}")
-                continue
-            acc = eval_acc(prediction_str, answer)
-            hit = eval_hit(prediction_str, answer)
+            scored = accuracy.score(prediction, [answer])
+            f1_score = scored["f1"]
+            precision_score, recall_score = scored["precision"], scored["recall"]
+            hit = scored["hit1"]
 
         f1_list.append(f1_score)
         precission_list.append(precision_score)
         recall_list.append(recall_score)
-        acc_list.append(acc)
         hit_list.append(hit)
 
-    result_str = "Accuracy: " + str(sum(acc_list) * 100 / len(acc_list)) + " Hit: " + str(sum(hit_list) * 100 / len(hit_list)) + " F1: " + str(sum(f1_list) * 100 / len(f1_list)) + " Precision: " + str(sum(precission_list) * 100 / len(precission_list)) + " Recall: " + str(sum(recall_list) * 100 / len(recall_list))
+    result_str = "Hit: " + str(sum(hit_list) * 100 / len(hit_list)) + " F1: " + str(sum(f1_list) * 100 / len(f1_list)) + " Precision: " + str(sum(precission_list) * 100 / len(precission_list)) + " Recall: " + str(sum(recall_list) * 100 / len(recall_list))
 
     # Extract method name from output_dir for display
     method_name = os.path.basename(args.output_dir)
@@ -224,7 +169,6 @@ if __name__ == '__main__':
     print(f"F1: {sum(f1_list) * 100 / len(f1_list):.2f}%")
     print(f"Precision: {sum(precission_list) * 100 / len(precission_list):.2f}%")
     print(f"Recall: {sum(recall_list) * 100 / len(recall_list):.2f}%")
-    print(f"Accuracy: {sum(acc_list) * 100 / len(acc_list):.2f}%")
     if canonical_gold is not None:
         print(f"\nScoring: canonical WebQSP - best F1 over the official parses, "
               f"Hit@1 over any parse, {len(f1_list)} questions in the denominator.")

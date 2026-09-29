@@ -17,7 +17,7 @@ Method:
   GPU:  prefer the in-band NVML counter delta the event already carries;
         otherwise integrate sampled GPU power (trapezoid) inside the event's
         window. Events shorter than the sampling period get nearest-sample
-        power x duration (an estimate, flagged in EMISSIONS.md).
+        power x duration (an estimate, flagged as such below).
   RAPL: cumulative counters -> energy delta over the window, interpolated
         between samples; handles counter wraparound.
 

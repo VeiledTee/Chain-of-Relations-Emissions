@@ -179,7 +179,8 @@ class TestOperationEnergy(VisualizeCase):
 		for ax, run in zip(fig.axes, runs):
 			drawn = {t.get_text(): p.get_height()
 			         for t, p in zip(ax.get_xticklabels(), ax.patches)}
-			expected = {r["operation_label"]: r["energy_j"] for r in rows
+			# The CSV keeps joules; the figure draws them in the default unit, Wh.
+			expected = {r["operation_label"]: visualize.j_to_wh(r["energy_j"]) for r in rows
 			            if r["run"] == run.label and r["plotted"]}
 			self.assertEqual(drawn, expected)
 		plt.close(fig)
@@ -257,7 +258,7 @@ class TestDomains(VisualizeCase):
 		fig = visualize.draw_operation_energy(plt, runs, rows, "cpu_package_energy_j", "j")
 		self.assertEqual(fig._suptitle.get_text(), "alpha CPU Package Energy by Operation")
 		self.assertIn("CPU Package energy", fig.axes[-1].get_ylabel())
-		self.assertIn("(J)", fig.axes[-1].get_ylabel())
+		self.assertIn("(Wh)", fig.axes[-1].get_ylabel())
 		self.assertNotIn("GPU", fig._suptitle.get_text())
 		plt.close(fig)
 
@@ -298,7 +299,7 @@ class TestQuestionEnergy(VisualizeCase):
 		line = fig.axes[0].get_lines()[0]
 		# energy on y, cumulative fraction of questions on x
 		self.assertEqual(list(line.get_xdata()), [r["ecdf"] for r in rows])
-		self.assertEqual(list(line.get_ydata()), [r["energy_j"] for r in rows])
+		self.assertEqual(list(line.get_ydata()), visualize.j_to_wh([r["energy_j"] for r in rows]))
 		plt.close(fig)
 
 	def test_trajectory_and_attributed_bases_give_their_own_values(self):
@@ -573,7 +574,8 @@ class TestEnergyOnYAxis(VisualizeCase):
 		for fig in self.figures(ylim=(0.5, 400.0)):
 			ax = fig.axes[0]
 			if "Share of" not in ax.get_ylabel():
-				self.assertEqual(tuple(ax.get_ylim()), (0.5, 400.0))
+				# limits are given in joules and drawn in the default unit, Wh
+				self.assertEqual(tuple(ax.get_ylim()), visualize.j_to_wh((0.5, 400.0)))
 			plt.close(fig)
 		code, _, err = self.plot("question-energy", self.alpha, extra=("--y-limits", "0.5,400"))
 		self.assertEqual(code, 0, err)

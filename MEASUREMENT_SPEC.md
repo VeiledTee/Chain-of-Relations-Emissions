@@ -733,9 +733,43 @@ Source: `trajectory_summary.csv` joined to answer scoring on `question_id`.
 | `measurement/analyze.py` | Derived tables and figures |
 | `measurement/visualize.py` | Paradigm-agnostic figures (PNG/PDF + plotted-data CSV) from attributed events and trajectory summaries |
 | `measurement/measure_run.py` | Measured-run orchestrator |
+| `measurement/make_comparable_figures.py` | Per-dataset per-question cache + per-system figures/correlation tables |
+| `measurement/thesis_figures.py` | Cross-dataset Figures 1 (operation-energy shares) and 2 (trajectory-correlation heatmap) |
+| `measurement/table1_effectiveness_energy.py` | Table 1 recreation + Figure 3 (current F1–energy comparison) |
+| `measurement/make_main_paper_figures.py` | Single entry point regenerating Figures 1–3 (see below) |
 | `tests/test_energy_measurement.py` | Frozen schema-v1 contract tests |
 | `tests/test_hardware_validation.py` | Capability, classification and accounting tests |
 | `tests/test_package_boundary.py` | One-way dependency rule and profiler public API |
+
+### Regenerating the main C2 paper figures
+
+All three main figures are produced by one command, from per-question caches
+already built by `make_comparable_figures.py --dataset {webqsp,cwq} ... --out DIR`:
+
+```
+python -m measurement.make_main_paper_figures \
+    --dataset webqsp=<webqsp per-question cache --out DIR> \
+    --dataset cwq=<cwq per-question cache --out DIR> \
+    --backbone Gemma-3-4B
+```
+
+Writes into `results/figures/cross_dataset/`:
+
+- `fig_operation_energy_shares_main.pdf` — Figure 1 (RQ1: where energy goes)
+- `fig_trajectory_correlation_heatmap_main.pdf` — Figure 2 (RQ2: Spearman rho
+  of output tokens / input tokens / LLM calls / traversal depth vs. GPU
+  energy, read verbatim from the existing per-system correlation tables — no
+  correlation is recomputed by this figure)
+- `fig_f1_energy_frontier_main.pdf` — Figure 3, the F1–energy comparison:
+  energy values are the measured-GPU-boundary quantity; F1 comes from the one
+  canonical evaluator (`chain_of_relations/eval/accuracy.py`: extracted final
+  answer only, normalized exact matching, set-based P/R/F1; WebQSP scored
+  against every official parse, CWQ against its answer list)
+
+KG-call-count is intentionally absent from Figure 2: no script in this
+repository has computed a KG-calls-vs-energy correlation, and the figure must
+not silently introduce one. Add it as a separate, explicitly-scoped task if
+needed later.
 
 ### Where the instrument lives
 

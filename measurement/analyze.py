@@ -14,7 +14,7 @@ Usage:
   python measurement/analyze.py measurement/runs/smoke_cor_webqsp
   python measurement/analyze.py measurement/runs/<tag> --no-plots   # tables only
 
-Honest-units note (mirrors EMISSIONS.md): per-question energy is robust;
+Honest-units note (see MEASUREMENT_SPEC.md): per-question energy is robust;
 per-event GPU energy is trustworthy where gpu_energy_j came from the NVML
 counter; CPU/DRAM are only meaningful when RAPL was present (bare metal).
 This script reports whatever is in the data and flags what's missing.
@@ -212,12 +212,15 @@ def make_plots(s, qs, gpus, run_dir):
 		print(f"(plots skipped: {e})")
 		return
 
+	sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+	from agent_energy_profiler.visualize import j_to_wh
+
 	tag = os.path.basename(run_dir.rstrip("/"))
 
-	# 1. per-question energy histogram
+	# 1. per-question energy histogram (analysis stays in J; figures draw Wh)
 	fig, ax = plt.subplots(figsize=(7, 4))
-	ax.hist(gpus, bins=30, color="#4C72B0", edgecolor="white")
-	ax.set_xlabel("GPU energy per question (J)")
+	ax.hist(j_to_wh(list(gpus)), bins=30, color="#4C72B0", edgecolor="white")
+	ax.set_xlabel("GPU energy per question (Wh)")
 	ax.set_ylabel("questions")
 	ax.set_title(f"Per-question GPU energy — {tag}")
 	fig.tight_layout()
@@ -245,10 +248,10 @@ def make_plots(s, qs, gpus, run_dir):
 
 	# 3. per-label energy bar
 	labs = sorted(s["by_label"], key=lambda x: -s["by_label"][x]["gpu_j"])
-	vals = [s["by_label"][l]["gpu_j"] for l in labs]
+	vals = j_to_wh([s["by_label"][l]["gpu_j"] for l in labs])
 	fig, ax = plt.subplots(figsize=(7, 4))
 	ax.barh(labs, vals, color="#8172B3")
-	ax.set_xlabel("GPU energy (J)")
+	ax.set_xlabel("GPU energy (Wh)")
 	ax.set_title(f"Energy by label — {tag}")
 	ax.invert_yaxis()
 	fig.tight_layout()

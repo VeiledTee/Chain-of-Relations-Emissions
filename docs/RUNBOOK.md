@@ -250,12 +250,6 @@ log, and modifies no run artifact. It defaults to the three WebQSP Gemma-3-4B
 runs in `measurement/runs/`; override with `--run NAME=DIR` and
 `--predictions NAME=FILE`.
 
-Legacy tools: `measurement/compare_runs.py`, `measurement/results_grid.py` and
-`measurement/pareto_plot.py` still read the pre-schema-v1 `gpu_j` column of
-`energy_summary.csv` and fail with `KeyError: 'gpu_j'` on schema-v1 runs. They
-have not been migrated; use `visualize.py` or `agent_energy_profiler.aggregate`
-for schema-v1 runs.
-
 ---
 
 ## Operational rules

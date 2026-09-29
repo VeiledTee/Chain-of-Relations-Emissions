@@ -15,26 +15,27 @@ release by `scripts/build_webqsp_official_gold.py`.
 
 The rules implemented here
 --------------------------
-* **F1** — compute precision/recall/F1 against each parse, keep the best F1.
-  Ties go to the earliest parse, exactly as the official `if f1 > bestf1` loop.
-* **Hit@1 / gold answer found** — 1 when the prediction matches an answer of
-  *any* parse. This is identical to the union rule ToG and PoG use in their
-  `eval/utils.py`, so our Hit@1 is directly comparable to their Exact Match.
+This module owns only the WebQSP *gold* handling; every metric is computed by
+`eval.accuracy.score`, the one scorer shared with CWQ and every system.
+
+* **F1** — precision/recall/F1 against each parse, keep the best F1. Ties go to
+  the earliest parse, exactly as the official `if f1 > bestf1` loop.
+* **Hit@1 / gold answer found** — 1 when a predicted answer equals an answer of
+  *any* parse (the union rule ToG and PoG use in their `eval/utils.py`).
 * **Empty gold** — the 11 official empty-answer questions are scored, not
   dropped, following the official `CalculatePRF1`: empty gold with an empty
-  prediction is correct (1.0); empty gold with any prediction scores 0.0. Every
-  paradigm here always emits at least one item, so in practice these 11 score 0,
-  which is also how ToG and PoG count them.
+  prediction scores (1, 1, 1); empty gold with any prediction scores P=0, R=1,
+  F1=0, and Hit@1 is 0.
 * **Question skipping** — the official evaluator skips a question when no parse
   is `QuestionQuality == "Good"` and `ParseQuality == "Complete"`. No question in
   the 1,639-question test set is skipped by that rule; `evaluable()` reports it
   so a future release cannot change underfoot unnoticed.
 
-Matching is this repository's own name matching (`eval.accuracy.match`), applied
-per parse. The official script compares MIDs because its reference predictions
-are MIDs; ours are generated surface names, so MID equality is not available.
-Literal-valued answers (dates, numbers, currency codes) are used exactly as the
-official `AnswerArgument` gives them -- no identifier is invented for them.
+Matching is `eval.accuracy`'s normalized exact name match, applied per parse.
+The official script compares MIDs because its reference predictions are MIDs;
+ours are generated surface names, so MID equality is not available to every
+system. Literal-valued answers (dates, numbers, currency codes) are used exactly
+as the official `AnswerArgument` gives them -- no identifier is invented for them.
 
 Denominators
 ------------
@@ -49,7 +50,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Sequence
 
-from chain_of_relations.eval.accuracy import eval_f1, eval_hit
+from chain_of_relations.eval import accuracy
 
 __all__ = [
 	"CANONICAL_DATASETS", "GOLD_PATH", "GOLD_SCHEMA_VERSION", "load_gold", "parses_for",
@@ -93,10 +94,9 @@ def parse_answer_names(parse: Dict[str, Any]) -> List[str]:
 	`entity_name` for entities; the official `answer_argument` verbatim for
 	literals, whose `entity_name` is null.
 
-	A blank `entity_name` also falls back to `answer_argument`. 30 answers
-	across 15 test questions carry `""` as their EntityName, and an empty gold
-	string matches every prediction under substring matching, which would score
-	those questions correct no matter what the system answered.
+	A blank `entity_name` also falls back to `answer_argument`: 30 answers
+	across 15 test questions carry `""` as their EntityName, and a blank gold
+	name can never be matched, so falling back keeps those answers scorable.
 	"""
 	names = []
 	for answer in parse.get("answers") or []:
@@ -125,46 +125,19 @@ class ScoreResult(dict):
 		return self["hit"]
 
 
-def _score_against(prediction: Sequence[str], gold_names: Sequence[str]):
-	"""precision, recall, f1 for one parse, following the official empty cases."""
-	if not gold_names:
-		# Official CalculatePRF1: no labeled answer.
-		return (1.0, 1.0, 1.0) if not prediction else (0.0, 1.0, 0.0)
-	if not prediction:
-		return 1.0, 0.0, 0.0
-	f1, precision, recall = eval_f1(list(prediction), list(gold_names))
-	return precision, recall, f1
-
-
 def score_prediction(prediction: Sequence[str], parses: Sequence[Dict[str, Any]]) -> ScoreResult:
 	"""Canonical score for one question.
 
-	`prediction` is the already post-processed item list this repository's
-	evaluator builds. Returns best-F1-over-parses plus any-parse Hit@1.
+	`prediction` is the answer list `eval.accuracy.extract_answers` produced.
+	Returns best-F1-over-parses plus any-parse Hit@1; no parses at all is
+	scored as empty gold, as the official CalculatePRF1 would.
 	"""
 	prediction = [p for p in prediction if p is not None]
-	answer_sets = [parse_answer_names(p) for p in parses]
-	empty_gold = not any(answer_sets)
-
-	best = None
-	for index, (parse, gold_names) in enumerate(zip(parses, answer_sets)):
-		precision, recall, f1 = _score_against(prediction, gold_names)
-		# Strictly greater, so ties keep the earliest parse: the official loop.
-		if best is None or f1 > best["f1"]:
-			best = {"f1": f1, "precision": precision, "recall": recall,
-			        "best_parse_index": index, "best_parse_id": parse.get("parse_id")}
-	if best is None:
-		# No parses at all: treat as empty gold, which is how the official
-		# CalculatePRF1 would score it.
-		precision, recall, f1 = _score_against(prediction, [])
-		best = {"f1": f1, "precision": precision, "recall": recall,
-		        "best_parse_index": None, "best_parse_id": None}
-
-	# Hit@1 against the union of every parse, which is ToG's and PoG's rule.
-	hit = 0
-	if not empty_gold and prediction:
-		joined = " ".join(prediction)
-		hit = 1 if any(eval_hit(joined, names) == 1 for names in answer_sets if names) else 0
-
-	return ScoreResult(dict(best, hit=hit, empty_gold=empty_gold,
-	                        n_parses=len(parses), evaluable=evaluable(parses)))
+	scored = accuracy.score(prediction, [parse_answer_names(p) for p in parses])
+	index = scored["best_index"]
+	return ScoreResult({
+		"f1": scored["f1"], "precision": scored["precision"], "recall": scored["recall"],
+		"best_parse_index": index,
+		"best_parse_id": parses[index].get("parse_id") if index is not None else None,
+		"hit": scored["hit1"], "empty_gold": scored["empty_gold"],
+		"n_parses": len(parses), "evaluable": evaluable(parses)})

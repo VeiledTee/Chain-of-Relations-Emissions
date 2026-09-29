@@ -13,12 +13,11 @@ import csv
 import glob
 import json
 import os
-import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from chain_of_relations.eval import webqsp_canonical
-from chain_of_relations.eval.accuracy import eval_f1, eval_hit
+from chain_of_relations.eval import accuracy, webqsp_canonical
+from chain_of_relations.eval.eval import prediction_answers
 from chain_of_relations.eval.webqsp_canonical import CANONICAL_DATASETS
 
 try:
@@ -68,81 +67,11 @@ def load_predictions(predict_file: Path) -> List[dict]:
 	return rows
 
 
-def extract_answer_from_braces(text: str):
-	if not isinstance(text, str):
-		return None
-
-	pattern = r"\{([^}]+)\}"
-	matches = re.findall(pattern, text)
-	if not matches:
-		return None
-
-	answer_text = matches[-1].strip()
-	if "," in answer_text:
-		return [item.strip() for item in answer_text.split(",") if item.strip()]
-	if " and " in answer_text.lower():
-		return [item.strip() for item in re.split(r"\s+and\s+", answer_text, flags=re.IGNORECASE) if item.strip()]
-	if answer_text:
-		return [answer_text]
-	return None
-
-
-def is_integer_text(text: str) -> bool:
-	return bool(re.fullmatch(r"[-+]?\d+", str(text or "").strip()))
-
-
-def postprocess_prediction_for_dataset(dataset: str, prediction: List[str], gold_answer: List[str]) -> List[str]:
-	dataset_key = str(dataset or "").strip().lower()
-	if dataset_key not in {"quad2", "quad_2"}:
-		return prediction
-
-	if not prediction:
-		return prediction
-
-	normalized = [str(item).strip() for item in prediction]
-	for item in normalized:
-		if is_integer_text(item):
-			return [item]
-
-	gold_non_empty = [
-		str(item).strip() for item in gold_answer
-		if str(item).strip() and str(item).strip().lower() != "none"
-	]
-	gold_is_numeric = bool(gold_non_empty) and all(is_integer_text(item) for item in gold_non_empty)
-	if not gold_is_numeric:
-		return normalized
-
-	non_empty = [
-		str(item).strip() for item in normalized
-		if str(item).strip() and str(item).strip().lower() != "none"
-	]
-	return [str(len(non_empty))]
-
-
 def parse_prediction(row: dict, dataset: str) -> Tuple[List[str], List[str]]:
+	"""(scored answers, gold names) for one row, via the canonical evaluator."""
 	gold_answers = row.get("gold_answer", []) or []
 	gold = [ans.get("name", "") for ans in gold_answers if isinstance(ans, dict) and ans.get("name")]
-
-	pred_results = row.get("results", [])
-	if not isinstance(pred_results, list) or not pred_results:
-		prediction = ["None"]
-	else:
-		raw_predictions = [
-			res.get("name", "") for res in pred_results
-			if isinstance(res, dict) and res.get("name")
-		]
-		prediction: List[str] = []
-		for raw_pred in raw_predictions:
-			extracted = extract_answer_from_braces(raw_pred)
-			if extracted:
-				prediction.extend(extracted)
-			else:
-				prediction.append(raw_pred)
-		if not prediction:
-			prediction = ["None"]
-
-	prediction = postprocess_prediction_for_dataset(dataset, prediction, gold)
-	return prediction, gold
+	return prediction_answers(row, dataset, gold), gold
 
 
 def _safe_int(value) -> int:
@@ -223,18 +152,14 @@ def evaluate_distribution(result_dir: Path, dataset: str) -> dict:
 
 	for row in predictions:
 		prediction, gold = parse_prediction(row, dataset)
-		prediction_str = " ".join(prediction)
 
 		if canonical_gold is not None:
 			scored = webqsp_canonical.score_prediction(
 				prediction, webqsp_canonical.parses_for(str(row.get("id", "")), canonical_gold))
 			hit, f1 = scored["hit"], scored["f1"]
-		elif gold:
-			hit = eval_hit(prediction_str, gold)
-			f1, _, _ = eval_f1(prediction, gold)
 		else:
-			hit = 0
-			f1 = 0.0
+			scored = accuracy.score(prediction, [gold])
+			hit, f1 = scored["hit1"], scored["f1"]
 
 		sample_id = str(row.get("id", "")).strip()
 		sample_tokens = token_by_id.get(sample_id)

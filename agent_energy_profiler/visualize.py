@@ -195,11 +195,120 @@ def plot_title(plot, domain, prefix="", x=""):
 	return f"{prefix} {text}" if prefix else text
 
 
-def energy_axis_label(domain, per="", basis=None, unit="J", lead=""):
+#: Exact definition of the display conversion. Analysis stays in joules; only
+#: the drawing layer divides, so no prepared table or CSV changes unit.
+JOULES_PER_WH = 3_600.0
+JOULES_PER_KWH = 3_600_000.0
+ENERGY_DISPLAY_DIVISOR = {"J": 1.0, "Wh": JOULES_PER_WH, "kWh": JOULES_PER_KWH}
+#: Every CLI that draws energy offers exactly these units.
+ENERGY_UNIT_CHOICES = tuple(ENERGY_DISPLAY_DIVISOR)
+#: Figures draw energy in Wh unless a caller asks for another unit.
+DEFAULT_ENERGY_UNIT = "Wh"
+_ENERGY_DISPLAY = {"unit": DEFAULT_ENERGY_UNIT}
+
+
+def j_to_wh(values):
+	"""Convert joules to watt-hours for drawing: the one J -> Wh conversion.
+
+	Accepts a scalar, a list/tuple/other iterable, a numpy array or a pandas
+	Series, and returns the same kind of thing (iterables other than a tuple
+	come back as a list). A missing value (None, or NaN in an array/Series)
+	stays missing; it never becomes zero. Only figures call this -- CSVs and
+	prepared tables keep joules.
+	"""
+	if values is None:
+		return None
+	if isinstance(values, (int, float)) or hasattr(values, "__array__"):
+		# Python numbers, numpy scalars/arrays and pandas Series divide
+		# element-wise and keep NaN as NaN.
+		return values / JOULES_PER_WH
+	converted = [None if v is None else v / JOULES_PER_WH for v in values]
+	return tuple(converted) if isinstance(values, tuple) else converted
+
+
+class energy_display:
+	"""Draw energy in `unit` for the duration of the block.
+
+	    with visualize.energy_display("kWh"):
+	        fig = visualize.draw_question_energy(...)
+
+	Affects plotted values, axis limits, tick labels, axis labels and the
+	energy amounts written into figures. It does not touch the row dicts the
+	prepare_* functions return, so companion CSVs stay in joules.
+	"""
+
+	def __init__(self, unit):
+		if unit not in ENERGY_DISPLAY_DIVISOR:
+			raise VisualizeError(f"unknown energy display unit {unit!r}; "
+			                     f"expected one of {sorted(ENERGY_DISPLAY_DIVISOR)}")
+		self.unit, self.previous = unit, None
+
+	def __enter__(self):
+		self.previous = _ENERGY_DISPLAY["unit"]
+		_ENERGY_DISPLAY["unit"] = self.unit
+		return self
+
+	def __exit__(self, *exc):
+		_ENERGY_DISPLAY["unit"] = self.previous
+		return False
+
+
+def display_energy_unit():
+	return _ENERGY_DISPLAY["unit"]
+
+
+def to_display_energy(value):
+	"""Joules -> the current display unit. None stays None, never becomes zero."""
+	if value is None:
+		return None
+	if _ENERGY_DISPLAY["unit"] == "Wh":
+		return j_to_wh(value)
+	return value / ENERGY_DISPLAY_DIVISOR[_ENERGY_DISPLAY["unit"]]
+
+
+def format_display_energy(value):
+	"""A converted energy value as text, with precision chosen by magnitude.
+
+	One rule for every unit: Wh values here run from about 0.04 to 2,400 and
+	kWh values from 4e-5 to 2.4, so a fixed number of decimals would either
+	truncate the small end or clutter the large one.
+	"""
+	if _ENERGY_DISPLAY["unit"] == "J":
+		return f"{value:,.0f}" if abs(value) >= 1 else f"{value:g}"
+	magnitude = abs(value)
+	if magnitude == 0:
+		return "0"
+	if magnitude >= 1000:
+		return f"{value:,.0f}"
+	if magnitude >= 10:
+		return f"{value:,.1f}"
+	if magnitude >= 1:
+		return f"{value:,.2f}"
+	if magnitude >= 1e-3:
+		return f"{value:,.4f}"
+	return f"{value:.2e}"
+
+
+def _energy_formatter():
+	"""Tick formatter for an axis carrying energy in the current display unit."""
+	from matplotlib.ticker import FuncFormatter
+	return FuncFormatter(lambda value, _: format_display_energy(value))
+
+
+def format_energy(joules):
+	"""One energy amount for a label, converted and suffixed with its unit."""
+	return f"{format_display_energy(to_display_energy(joules))} {display_energy_unit()}"
+
+
+def energy_axis_label(domain, per="", basis=None, unit=None, lead=""):
+	unit = display_energy_unit() if unit is None else unit
 	label = f"{lead}{domain_name(domain)} energy"
 	if per:
 		label += f" {per}"
-	if basis:
+	# The basis clause names the measurement boundary and belongs on a joules
+	# axis. A converted axis carries the unit instead and the basis stays in the
+	# figure's caption and companion CSV, which keep the joule values.
+	if basis and unit == "J":
 		label += f", {BASIS_PHRASE[basis]}"
 	return f"{label} ({unit})"
 
@@ -975,6 +1084,9 @@ def _use_log(values, linear):
 def _fmt(value, unit):
 	if unit == UNIT_PERCENT:
 		return f"{value:.1f}%"
+	if display_energy_unit() != "J":
+		# Already converted by the caller; precision follows the magnitude.
+		return format_display_energy(value)
 	return f"{value:,.0f}" if abs(value) >= 10 else f"{value:.2f}"
 
 
@@ -1015,9 +1127,14 @@ def _figure_or_axes(plt, ax, figsize):
 
 
 def _apply_ylim(ax, ylim):
-	"""Caller-fixed energy-axis limits, e.g. to compare figures of different runs."""
+	"""Caller-fixed energy-axis limits, e.g. to compare figures of different runs.
+
+	Limits arrive in joules, like every other energy value a caller holds, and
+	are converted here so a caller never has to know the display unit.
+	"""
 	if not ylim:
 		return
+	ylim = tuple(to_display_energy(v) for v in ylim)
 	if ax.get_yscale() == "log" and ylim[0] <= 0:
 		raise VisualizeError("--y-limits must be positive on a log energy axis (or add --linear)")
 	ax.set_ylim(*ylim)
@@ -1037,14 +1154,18 @@ def draw_operation_energy(plt, runs, rows, domain, unit, ylim=None):
 		                        r["operation_label"]))
 		panels.append((run, sub))
 	# A fixed size per panel keeps single-run figures of different runs comparable.
-	fig, axes = plt.subplots(len(panels), 1, sharey=True, squeeze=False,
-	                         figsize=(OPERATION_FIG_IN[0], OPERATION_FIG_IN[1] * len(panels)))
-	values = [r[key] for _, sub in panels for r in sub]
+	# Multiple runs sit side by side (one panel per run, left to right) rather
+	# than stacked, so runs can be read across a single eye-line.
+	fig, axes = plt.subplots(1, len(panels), sharey=True, squeeze=False,
+	                         figsize=(OPERATION_FIG_IN[0] * len(panels), OPERATION_FIG_IN[1]))
+	# Percent stays percent; an energy series is converted for display only.
+	convert = (lambda v: v) if unit == UNIT_PERCENT else to_display_energy
+	values = [convert(r[key]) for _, sub in panels for r in sub]
 	hi, lo = max([0.0] + values), min([0.0] + values)
 	span = (hi - lo) or 1.0
 	mixed = any(r["row_kind"] == ROW_UNATTRIBUTED for r in drawn)
-	for ax, (run, sub) in zip(axes[:, 0], panels):
-		vals = [r[key] for r in sub]
+	for ax, (run, sub) in zip(axes[0, :], panels):
+		vals = [convert(r[key]) for r in sub]
 		colours = [PALETTE[0] if r["row_kind"] == ROW_OPERATION else NEUTRAL for r in sub]
 		ax.bar(range(len(sub)), vals, color=colours, width=0.64,
 		       edgecolor=SURFACE, linewidth=1.0)
@@ -1065,7 +1186,7 @@ def draw_operation_energy(plt, runs, rows, domain, unit, ylim=None):
 			# The residual bar is not attributed energy, so the axis names no basis
 			# when it is drawn; the legend separates operations from the residual.
 			ax.set_ylabel(energy_axis_label(domain, basis=None if mixed else BASIS_ATTRIBUTED))
-			ax.yaxis.set_major_formatter(_number_formatter())
+			ax.yaxis.set_major_formatter(_energy_formatter())
 	axes[0, 0].set_ylim(lo - (span * 0.08 if lo < 0 else 0.0), hi + span * 0.12)
 	_apply_ylim(axes[0, 0], ylim)
 	if mixed:
@@ -1153,6 +1274,10 @@ def draw_semantic_flow(plt, run, rows, domain):
 		                       alpha=0.32, gid=gid))
 
 	def amount(joules):
+		# In joules the figure picks its own J/kJ/MJ scale; a requested display
+		# unit overrides that so every figure in a set reads the same way.
+		if display_energy_unit() != "J":
+			return format_energy(joules)
 		return f"{joules / divisor:,.1f} {unit}"
 
 	bar(x_root, root_spans[0], INK2, f"node:{LEVEL_ROOT}:{ROOT_NODE}")
@@ -1191,18 +1316,18 @@ def draw_question_energy(plt, runs, rows, stats, domain, basis, marks, linear, y
 	fig, ax = plt.subplots(figsize=(6.4, 4.2))
 	for i, run in enumerate(runs):
 		sub = [r for r in rows if r["run"] == run.label]
-		energies = [r["energy_j"] for r in sub]
+		energies = [to_display_energy(r["energy_j"]) for r in sub]
 		ax.step([r["ecdf"] for r in sub], energies, where="pre", color=PALETTE[i],
 		        linewidth=1.8, label=run.label)
 		stat = next(s for s in stats if s["run"] == run.label)
 		for mark in marks:
-			value = stat[mark]
+			value = to_display_energy(stat[mark])
 			share = sum(1 for e in energies if e <= value) / len(energies)
 			ax.plot([share], [value], MARK_SHAPES[mark], color=PALETTE[i], markersize=6,
 			        markeredgecolor=SURFACE, markeredgewidth=1.2)
 	if _use_log([r["energy_j"] for r in rows], linear):
 		ax.set_yscale("log")
-	ax.yaxis.set_major_formatter(_number_formatter())
+	ax.yaxis.set_major_formatter(_energy_formatter())
 	ax.set_xlim(0, 1.0)
 	ax.set_xlabel("Cumulative fraction of questions")
 	ax.set_ylabel(energy_axis_label(domain, "per question", basis))
@@ -1246,7 +1371,8 @@ def draw_energy_vs(plt, runs, rows, stats, domain, basis, x, linear, ylim=None, 
 		for category in categories:
 			sub = [r for r in rows if (r.get("category") or UNANNOTATED) == category]
 			spec = styles.get(category, {})
-			ax.scatter([r["x"] for r in sub], [r["energy_j"] for r in sub], s=11, alpha=0.35,
+			ax.scatter([r["x"] for r in sub], [to_display_energy(r["energy_j"]) for r in sub],
+			           s=11, alpha=0.35,
 			           color=spec.get("colour", NEUTRAL), marker=spec.get("marker", "o"),
 			           linewidths=0, label=f"{spec.get('label', category)} (n = {len(sub):,})")
 	else:
@@ -1258,14 +1384,14 @@ def draw_energy_vs(plt, runs, rows, stats, domain, basis, x, linear, ylim=None, 
 				         f"ρ = {stat['spearman_rho']:.2f}, n = {stat['n_pairs']:,})")
 			else:
 				label = f"{run.label} (n = {stat['n_pairs']:,}; correlation unavailable)"
-			ax.scatter([r["x"] for r in sub], [r["energy_j"] for r in sub], s=10, alpha=0.45,
-			           color=PALETTE[i], linewidths=0, label=label)
+			ax.scatter([r["x"] for r in sub], [to_display_energy(r["energy_j"]) for r in sub],
+			           s=10, alpha=0.45, color=PALETTE[i], linewidths=0, label=label)
 	if _use_log([r["x"] for r in rows], linear):
 		ax.set_xscale("log")
 	if _use_log([r["energy_j"] for r in rows], linear):
 		ax.set_yscale("log")
 	ax.xaxis.set_major_formatter(_number_formatter())
-	ax.yaxis.set_major_formatter(_number_formatter())
+	ax.yaxis.set_major_formatter(_energy_formatter())
 	ax.set_xlabel(variable_axis_label(x))
 	ax.set_ylabel(energy_axis_label(domain, "per question", basis))
 	_apply_ylim(ax, ylim)
@@ -1284,7 +1410,7 @@ def draw_outcome_energy(plt, runs, rows, domain, basis, linear, ylim=None, ax=No
 	position = 0.0
 	for i, run in enumerate(runs):
 		for outcome in (NO_FALLBACK, FALLBACK):
-			values = [r["energy_j"] for r in rows
+			values = [to_display_energy(r["energy_j"]) for r in rows
 			          if r["run"] == run.label and r["outcome"] == outcome]
 			if not values:
 				continue
@@ -1312,7 +1438,7 @@ def draw_outcome_energy(plt, runs, rows, domain, basis, linear, ylim=None, ax=No
 	ax.grid(axis="x", visible=False)
 	if _use_log([v for d in data for v in d], linear):
 		ax.set_yscale("log")
-	ax.yaxis.set_major_formatter(_number_formatter())
+	ax.yaxis.set_major_formatter(_energy_formatter())
 	ax.set_ylabel(energy_axis_label(domain, "per question", basis))
 	_apply_ylim(ax, ylim)
 	ax.legend(handles=[Line2D([], [], color=INK, linewidth=1.4, label="median"),
@@ -1338,17 +1464,18 @@ def draw_fallback_split(plt, runs, means, domain, ylim=None, ax=None):
 			          and r["component"] == component), None)
 			if m is None:
 				continue   # this run has no such component; nothing is drawn for it
-			ax.bar(i, m["mean_energy_j"], bottom=bottom, color=PALETTE[j], width=0.55,
+			height = to_display_energy(m["mean_energy_j"])
+			ax.bar(i, height, bottom=bottom, color=PALETTE[j], width=0.55,
 			       edgecolor=SURFACE, linewidth=1.0,
 			       label=None if component in legend_done else COMPONENT_NAMES[component])
 			legend_done.add(component)
-			bottom += m["mean_energy_j"]
+			bottom += height
 		n = next(r["n_fallback_questions"] for r in means if r["run"] == run.label)
 		labels.append(f"{run.label}\n(n = {n:,})")
 	ax.set_xticks(range(len(runs)), labels)
 	ax.set_xlim(-0.6, len(runs) - 0.4)
 	ax.grid(axis="x", visible=False)
-	ax.yaxis.set_major_formatter(_number_formatter())
+	ax.yaxis.set_major_formatter(_energy_formatter())
 	ax.set_ylabel(energy_axis_label(domain, "per fallback question", BASIS_ATTRIBUTED,
 	                                lead="Mean "))
 	_apply_ylim(ax, ylim)
@@ -1392,12 +1519,18 @@ def write_rows(path, rows, fields):
 	return path
 
 
-def save_figure(fig, out_dir, stem):
-	png = os.path.join(out_dir, f"{stem}.png")
+def save_figure(fig, out_dir, stem, png=True):
+	"""Write stem.pdf, and stem.png too unless png=False. Final thesis figures
+	pass png=False (PDF only, per CLAUDE.md's Generated Artifact Hygiene);
+	diagnostic/intermediate figures keep the PNG+PDF default."""
 	pdf = os.path.join(out_dir, f"{stem}.pdf")
-	fig.savefig(png, dpi=200, bbox_inches="tight")
 	fig.savefig(pdf, bbox_inches="tight", metadata={"CreationDate": None, "ModDate": None})
-	return [png, pdf]
+	paths = [pdf]
+	if png:
+		png_path = os.path.join(out_dir, f"{stem}.png")
+		fig.savefig(png_path, dpi=200, bbox_inches="tight")
+		paths.append(png_path)
+	return paths
 
 
 def check_out_dir(out, runs):

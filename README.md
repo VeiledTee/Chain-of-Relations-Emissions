@@ -358,13 +358,17 @@ python -m chain_of_relations.eval.eval --dataset webqsp \
   --output_dir results/cor/webqsp/gemma-3-4b-it
 ```
 
+Scoring is `chain_of_relations/eval/accuracy.py`, the one evaluator: the
+extracted final answer only (never rationale text), normalized exact matching,
+set-based precision / recall / F1; WebQSP is scored against every official parse.
+
 Current WebQSP / Gemma-3-4B results, full 1,639 denominator:
 
 | System | F1 | Gold answer found (Hit@1) |
 |---|---|---|
-| CoR | 43.54% | 62.48% |
-| ToG | 42.10% | 57.23% |
-| PoG | 45.79% | 57.90% |
+| CoR | 48.60% | 57.72% |
+| ToG | 35.39% | 48.93% |
+| PoG | 32.55% | 40.09% |
 
 ---
 
@@ -408,7 +412,12 @@ python measurement/make_comparable_figures.py --out "$HOME/webqsp_supervisor_sum
 | `fig3_{sys}_trajectory_properties` | workload vs energy (output/input tokens, LLM calls, max depth), coloured by answer outcome |
 | `fig4_{sys}_outcome_and_fallback` | energy by outcome + the fallback/non-fallback split |
 | `fig5_{sys}_semantic_flow` | total → operation type → operation label energy flow |
+| `fig6_webqsp_answerability_outcomes` | **WebQSP only** (skipped for other datasets): one square per question, gold answer found / not found, rows = official empty-gold (11), gold-query mismatch (11), expected/reproducible (1,617), columns = PoG, ToG, CoR; plus `.csv` (counts), `_compact.csv` / `.md` (`found / total (%)`), `_questions.csv` (per question) |
 | `outcomes_{sys}.csv` | per-question outcomes from the dataset's own evaluator |
+
+Figure 6 reads its groups from the committed
+`datasets/webqsp/webqsp_answerability_groups.csv` (provenance in
+[datasets/README.md](datasets/README.md)); it never queries the graph.
 
 **Summary tables** — the supervisor-level statistics, from the run directories
 plus those outcome CSVs. Dataset-agnostic; `--dataset` is only a label:
@@ -428,7 +437,7 @@ gold-found counts and rate, mean/median/p90/total GPU energy, tokens and LLM
 calls per question, top-10% energy share, energy by outcome, depth vs outcome,
 fallback rates and success, the before/in-fallback energy split, and the
 fallback-reason breakdown. Effectiveness is read from the outcome CSVs (the
-dataset's own evaluator), never recomputed; `--effectiveness CoR=43.54,62.48`
+dataset's own evaluator), never recomputed; `--effectiveness CoR=48.60,57.72`
 pastes the evaluator's own aggregates instead.
 
 Custom runs, predictions and output directory:
@@ -444,8 +453,8 @@ python measurement/make_comparable_figures.py \
   --predictions PoG=results/pog/webqsp/gemma-3-4b-it/predict.jsonl
 ```
 
-The script writes only into `--out`, verifies that no run artifact changed, and
-prints a `PASS run artifacts unchanged` line.
+The script writes only into `--out`, verifies that no run artifact or prediction
+file changed, and prints a `PASS run artifacts and prediction files unchanged` line.
 
 ---
 
@@ -476,8 +485,8 @@ python measurement/summarize_comparable_runs.py \
   --outcomes CoR="$HOME/webqsp_supervisor_summary/outcomes_cor.csv"
 ```
 
-Expect `CoR 43.54 / 62.48`, `ToG 42.10 / 57.23`, `PoG 45.79 / 57.90`
-(F1 / Hit@1), 60 files in the figure directory, and every check passing.
+Expect `CoR 48.60 / 57.72`, `ToG 35.39 / 48.93`, `PoG 32.55 / 40.09`
+(F1 / Hit@1), 66 files in the figure directory, and every check passing.
 
 ---
 
@@ -543,7 +552,6 @@ scripts/run_experiments.sh                               # 1-question smoke of a
 | [MEASUREMENT_SPEC.md](MEASUREMENT_SPEC.md) | authoritative protocol: boundary, schema v1, taxonomy, missing-domain policy, trajectory accounting, host capability gate, analysis contract |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | status, development-host findings, phase plan |
 | [CLAUDE.md](CLAUDE.md) | project contract and schema-v1 field definitions |
-| [EMISSIONS.md](EMISSIONS.md) | **superseded**; pre-schema-v1, retained for history |
 
 ---
 

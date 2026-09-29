@@ -96,18 +96,29 @@ def percentile(values, q):
 
 
 def read_trajectories(run_dir):
-	"""question_id -> {gpu_energy_j, max_traversal_depth} from trajectory_summary.csv."""
+	"""question_id -> per-question trajectory facts from trajectory_summary.csv.
+
+	`gpu_energy_j` and `max_traversal_depth` are the two fields every caller has
+	always used. `wall_s`, `max_iteration` and `n_failed_events` are read from the
+	same row so an outcome-group workload comparison does not need a second pass;
+	a column the run did not write stays None rather than becoming zero.
+	"""
 	path = os.path.join(run_dir, "trajectory_summary.csv")
 	if not os.path.exists(path):
 		raise SystemExit(f"{run_dir}: no trajectory_summary.csv (not an attributed run?)")
+	def number(row, column, cast):
+		value = row.get(column)
+		return cast(value) if value not in (None, "") else None
+
 	out = {}
 	with open(path) as f:
 		for row in csv.DictReader(f):
-			energy = row.get("trajectory_gpu_energy_j")
-			depth = row.get("max_traversal_depth")
 			out[row["question_id"]] = {
-				"gpu_energy_j": float(energy) if energy not in (None, "") else None,
-				"max_traversal_depth": int(depth) if depth not in (None, "") else None,
+				"gpu_energy_j": number(row, "trajectory_gpu_energy_j", float),
+				"max_traversal_depth": number(row, "max_traversal_depth", int),
+				"wall_s": number(row, "trajectory_wall_s", float),
+				"max_iteration": number(row, "max_iteration", int),
+				"n_failed_events": number(row, "n_failed_events", int),
 			}
 	return out
 
@@ -135,16 +146,23 @@ def read_events(run_dir):
 	for question_id, events in by_question.items():
 		events.sort(key=lambda e: (e.get("step_index")
 		                           if e.get("step_index") is not None else -1))
-		llm_calls = input_tokens = output_tokens = 0
+		llm_calls = kg_calls = input_tokens = output_tokens = failed_events = 0
+		by_label = collections.Counter()
 		for event in events:
+			if event.get("status") not in (None, "ok"):
+				failed_events += 1
+			by_label[event.get("operation_label")] += event.get("gpu_energy_j") or 0.0
 			if event.get("operation_type") == "llm":
 				llm_calls += 1
 				input_tokens += event.get("input_tokens") or 0
 				output_tokens += event.get("output_tokens") or 0
+			elif event.get("operation_type") == "kg":
+				kg_calls += 1
 		marks = [i for i, e in enumerate(events) if (e.get("meta") or {}).get("fallback") is True]
 		energy = lambda items: sum(e.get("gpu_energy_j") or 0.0 for e in items)  # noqa: E731
-		record = {"llm_calls": llm_calls, "input_tokens": input_tokens,
-		          "output_tokens": output_tokens, "fallback_reason": None,
+		record = {"llm_calls": llm_calls, "kg_calls": kg_calls, "input_tokens": input_tokens,
+		          "output_tokens": output_tokens, "failed_events": failed_events,
+		          "operation_energy_j": dict(by_label), "fallback_reason": None,
 		          "energy_before": None, "energy_in": None, "energy_after": None}
 		if marks:
 			first, last = marks[0], marks[-1]
