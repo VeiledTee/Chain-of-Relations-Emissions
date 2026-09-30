@@ -109,7 +109,9 @@ def load_power(path):
 				continue
 			ts.append(float(row[0]))
 			for i, h in gpu_pw_idx:
-				gpu_power_cols[h].append(float(row[i]) if row[i] else 0.0)
+				# An unreadable power sample is missing, not 0 W: integrate_gpu
+				# skips it rather than integrating a fabricated zero.
+				gpu_power_cols[h].append(float(row[i]) if row[i] else None)
 			for i, h in gpu_en_idx:
 				gpu_energy_cols[h].append(float(row[i]) if row[i] else None)
 			for i, h in rapl_idx:
@@ -156,10 +158,30 @@ def classify_rapl(rapl_cols):
 	return package, core, dram
 
 
+def backward_steps(ts):
+	"""Adjacent sample pairs whose wall-clock timestamp went backwards.
+
+	Returns [(index, t_before, t_after)] with t_after < t_before. The timeline
+	is reported as-is: it is never sorted or repaired, because the samples'
+	counter values belong to the order in which they were read.
+	"""
+	return [(i, ts[i], ts[i + 1]) for i in range(len(ts) - 1) if ts[i + 1] < ts[i]]
+
+
 def integrate_gpu(ts, watts, t0, t1):
-	"""Trapezoidal integral of power over [t0, t1] -> Joules."""
-	if not ts or t1 <= t0:
-		return 0.0
+	"""Trapezoidal integral of power over [t0, t1] -> Joules, or None.
+
+	None, never 0.0, when the window is impossible (t1 <= t0, e.g. a wall
+	clock that stepped backwards mid-event) or when no usable power sample
+	exists: there is then no measurement, and a zero would be fabricated.
+	"""
+	if t0 is None or t1 is None or t1 <= t0:
+		return None
+	pts = [(t, w) for t, w in zip(ts, watts) if w is not None]
+	if not pts:
+		return None
+	ts = [p[0] for p in pts]
+	watts = [p[1] for p in pts]
 	lo = bisect.bisect_left(ts, t0)
 	hi = bisect.bisect_right(ts, t1)
 	if lo >= len(ts):
@@ -352,7 +374,7 @@ def render_coverage_failure(uncovered, considered, ts):
 
 def attribute_events(events, ts, gpus, rapls):
 	pkg_cols, core_cols, dram_cols = classify_rapl(rapls)
-	gpu_src = {"counter": 0, "integrated": 0}
+	gpu_src = {"counter": 0, "integrated": 0, "unavailable": 0}
 	rows = []
 
 	for e in events:
@@ -363,18 +385,26 @@ def attribute_events(events, ts, gpus, rapls):
 		if t0 is None or t1 is None:
 			continue
 
+		# A valid in-band counter reading is kept whatever the wall clock did:
+		# it is a difference of the monotonic hardware register, not of time.
 		measured = e.get("gpu_energy_j")
 		if measured is not None:
 			gpu_j = measured
 			gpu_source = "nvml_counter"
 			gpu_src["counter"] += 1
-		elif gpus:
-			gpu_j = sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
-			gpu_source = "power_integration"
-			gpu_src["integrated"] += 1
 		else:
-			gpu_j = None
-			gpu_source = None
+			parts = [integrate_gpu(ts, w, t0, t1) for w in gpus.values()]
+			if parts and all(p is not None for p in parts):
+				gpu_j = sum(parts)
+				gpu_source = "power_integration"
+				gpu_src["integrated"] += 1
+			else:
+				# No counter, and no integrable window (reversed/empty interval,
+				# no usable samples, or no GPU columns): unmeasured, not 0 J.
+				gpu_j = None
+				gpu_source = None
+				if gpus:
+					gpu_src["unavailable"] += 1
 
 		cpu_package_j = sum_domain(ts, pkg_cols, t0, t1)
 		cpu_core_j = sum_domain(ts, core_cols, t0, t1)  # diagnostic only
@@ -402,6 +432,9 @@ def attribute_events(events, ts, gpus, rapls):
 			"measured_energy_j": total,
 			"available_energy_domains": domains,
 			"measurement_complete": total is not None,
+			# The wall clock stepped backwards during this event. Its counter
+			# energy (if any) is still valid; its duration and window are not.
+			"clock_anomaly": t1 < t0,
 		})
 		rows.append(row)
 
@@ -469,9 +502,21 @@ def main():
 		for row in rows:
 			f.write(json.dumps(row) + "\n")
 
+	# Clock safety: the sampler and the event log stamp with the wall clock,
+	# which can step backwards (e.g. WSL2 time sync). Reported, never repaired.
+	steps = backward_steps(ts)
+	n_reversed = sum(1 for row in rows if row.get("clock_anomaly"))
+	if steps or n_reversed:
+		largest = max((a - b for _, a, b in steps), default=0.0)
+		print(f"WARNING: wall-clock anomaly: {len(steps)} backward step(s) in "
+		      f"power.csv (largest {largest:.3f}s) and {n_reversed} event(s) with "
+		      f"end < start. NVML counter energies are unaffected; affected "
+		      f"trajectories are flagged clock_anomaly=true.", file=sys.stderr)
+
 	pkg_cols, core_cols, dram_cols = classify_rapl(rapls)
 	print(f"GPU energy source: {gpu_src['counter']} from NVML counter, "
-	      f"{gpu_src['integrated']} integrated from power curve")
+	      f"{gpu_src['integrated']} integrated from power curve, "
+	      f"{gpu_src['unavailable']} unavailable (null, not 0)")
 	print(f"RAPL domains found: package={len(pkg_cols)} core={len(core_cols)} "
 	      f"dram={len(dram_cols)}")
 	if not pkg_cols and not dram_cols:
@@ -528,14 +573,17 @@ def main():
 		dram_c = sum_domain(ts, dram_cols, t0, t1)
 
 		# diagnostics from the sampled power curve
-		sampled = (sum(integrate_gpu(ts, w, t0, t1) for w in gpus.values())
-		           if gpus else None)
+		sampled = None
+		if gpus:
+			parts = [integrate_gpu(ts, w, t0, t1) for w in gpus.values()]
+			sampled = sum(parts) if all(p is not None for p in parts) else None
 		mean_w = peak_w = None
 		if gpus:
 			lo = bisect.bisect_left(ts, t0)
 			hi = bisect.bisect_right(ts, t1)
 			window = [sum(vals[k] for vals in gpus.values())
-			          for k in range(lo, max(lo, hi))]
+			          for k in range(lo, max(lo, hi))
+			          if all(vals[k] is not None for vals in gpus.values())]
 			if window:
 				mean_w = sum(window) / len(window)
 				peak_w = max(window)
@@ -559,8 +607,9 @@ def main():
 		      "counter). Integrated sampled power is reported only as the "
 		      "diagnostic sampled_gpu_energy_estimate_j and is NOT substituted.")
 
-	traj_rows = trajectory.accumulate(rows, window_energy=window_energy if ts else None)
-	traj_summary = trajectory.summarize(traj_rows)
+	traj_rows = trajectory.accumulate(rows, window_energy=window_energy if ts else None,
+	                                  clock_backsteps=[(a, b) for _, a, b in steps])
+	traj_summary = trajectory.summarize(traj_rows, power_backward_steps=len(steps))
 	traj_csv = os.path.join(os.path.dirname(os.path.abspath(out_events)),
 	                        "trajectory_summary.csv")
 	traj_json = os.path.join(os.path.dirname(os.path.abspath(out_events)),

@@ -76,6 +76,11 @@ def detect_git_commit() -> str:
 	return _events.detect_git_commit(_REPO_ROOT)
 
 
+def detect_git_dirty():
+	"""Working-tree state of THIS repository: True/False, or None if unknown."""
+	return _events.detect_git_dirty(_REPO_ROOT)
+
+
 # --- 2. the one KG-specific label rule ------------------------------------
 
 def _classify_sparql(sparql_txt: str):

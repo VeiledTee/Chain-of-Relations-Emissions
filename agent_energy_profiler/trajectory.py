@@ -83,13 +83,22 @@ def event_window(event):
 	return start, end
 
 
+def is_reversed(start, end):
+	"""An interval whose wall-clock end precedes its start (clock stepped back)."""
+	return start is not None and end is not None and end < start
+
+
 def merge_intervals(intervals):
-	"""Union of [start, end) intervals, as a sorted non-overlapping list."""
-	ordered = sorted(i for i in intervals if i[0] is not None and i[1] is not None)
+	"""Union of [start, end) intervals, as a sorted non-overlapping list.
+
+	Reversed intervals are excluded, not swapped: swapping would invent a
+	window the event never occupied and could report it as a real overlap.
+	They are counted separately as clock anomalies (see accumulate).
+	"""
+	ordered = sorted(i for i in intervals if i[0] is not None and i[1] is not None
+	                 and not is_reversed(i[0], i[1]))
 	merged = []
 	for start, end in ordered:
-		if end < start:
-			start, end = end, start
 		if merged and start <= merged[-1][1]:
 			merged[-1] = (merged[-1][0], max(merged[-1][1], end))
 		else:
@@ -113,8 +122,8 @@ def overlap_stats(intervals):
 
 	edges = []
 	for start, end in windows:
-		if end < start:
-			start, end = end, start
+		if is_reversed(start, end):
+			continue  # a clock anomaly, not a concurrent event
 		edges.append((start, 1))
 		edges.append((end, -1))
 	edges.sort()
@@ -155,17 +164,25 @@ def trajectory_windows(events):
 	return {q: tuple(v) for q, v in windows.items()}
 
 
-def accumulate(events, window_energy=None):
+def accumulate(events, window_energy=None, clock_backsteps=None):
 	"""Per-question trajectory accounting rows.
 
-	events        attributed events (attribution.py output)
-	window_energy optional callable (t0, t1) -> dict of ENERGY_FIELDS for the
-	              whole window, computed independently from the hardware
-	              timeline. When omitted, the trajectory total falls back to
-	              the summed event energy and coverage is reported as None,
-	              because there is then no independent quantity to reconcile
-	              against and a coverage of exactly 1.0 would be circular.
+	events          attributed events (attribution.py output)
+	window_energy   optional callable (t0, t1) -> dict of ENERGY_FIELDS for the
+	                whole window, computed independently from the hardware
+	                timeline. When omitted, the trajectory total falls back to
+	                the summed event energy and coverage is reported as None,
+	                because there is then no independent quantity to reconcile
+	                against and a coverage of exactly 1.0 would be circular.
+	clock_backsteps optional [(t_before, t_after)] where the hardware
+	                timeline's wall clock stepped backwards.
+
+	clock_anomaly flags a question whose window contains a backward timeline
+	step or any event with end < start. Its counter energies are kept: the
+	flag says the wall-clock window (and so the trajectory counter lookup and
+	durations) may be unreliable, not that the energy was invented.
 	"""
+	backsteps = list(clock_backsteps or [])
 	by_question = defaultdict(list)
 	for event in events:
 		by_question[event.get("question_id")].append(event)
@@ -195,6 +212,11 @@ def accumulate(events, window_energy=None):
 			"max_iteration": _max_or_none(e.get("iteration") for e in group),
 			"max_traversal_depth": _max_or_none(e.get("traversal_depth") for e in group),
 		}
+		row["n_reversed_events"] = sum(1 for s, e in windows if is_reversed(s, e))
+		row["power_backsteps_in_window"] = (
+			sum(1 for a, b in backsteps if t0 <= a <= t1 or t0 <= b <= t1)
+			if (t0 is not None and t1 is not None) else 0)
+		row["clock_anomaly"] = bool(row["n_reversed_events"] or row["power_backsteps_in_window"])
 
 		# Inter-event gap: wall time inside the trajectory that no event covers.
 		if row["trajectory_wall_s"] is not None:
@@ -252,10 +274,16 @@ def _max_or_none(values):
 	return max(present) if present else None
 
 
-def summarize(rows):
-	"""Run-level roll-up of the trajectory rows."""
+def summarize(rows, power_backward_steps=None):
+	"""Run-level roll-up of the trajectory rows.
+
+	power_backward_steps: backward wall-clock steps found in the hardware
+	timeline (None when the caller did not check).
+	"""
 	if not rows:
-		return {"n_trajectories": 0}
+		return {"n_trajectories": 0, "power_backward_steps": power_backward_steps,
+		        "n_clock_anomaly_trajectories": 0,
+		        "clock_anomaly": bool(power_backward_steps)}
 
 	overlapping = [r for r in rows if r["events_overlap"]]
 	coverages = [r["coverage_gpu_energy_j"] for r in rows
@@ -269,7 +297,12 @@ def summarize(rows):
 		"total_inter_event_gap_s": sum(r["inter_event_gap_s"] or 0.0 for r in rows),
 		"coverage_is_independent": any(r["coverage_is_independent"] for r in rows),
 		"n_failed_events": sum(r["n_failed_events"] for r in rows),
+		"power_backward_steps": power_backward_steps,
+		"n_reversed_events": sum(r.get("n_reversed_events", 0) for r in rows),
+		"n_clock_anomaly_trajectories": sum(1 for r in rows if r.get("clock_anomaly")),
 	}
+	summary["clock_anomaly"] = bool(power_backward_steps
+	                                or summary["n_clock_anomaly_trajectories"])
 	if coverages:
 		ordered = sorted(coverages)
 		summary["gpu_coverage_min"] = ordered[0]
@@ -314,6 +347,11 @@ def render(rows, summary):
 	         f"  total_overlap={summary['total_overlap_s']:.3f}s")
 	L.append(f"inter-event gap (unattributed wall time): "
 	         f"{summary['total_inter_event_gap_s']:.3f}s")
+	if summary.get("clock_anomaly"):
+		L.append(f"CLOCK ANOMALY: {summary.get('power_backward_steps') or 0} backward "
+		         f"power.csv step(s), {summary.get('n_reversed_events', 0)} reversed "
+		         f"event(s); {summary.get('n_clock_anomaly_trajectories', 0)} "
+		         f"trajectories flagged clock_anomaly (counter energies kept)")
 	if not summary.get("coverage_is_independent"):
 		L.append("coverage: NOT COMPUTED -- no independent whole-window energy "
 		         "available, so a coverage figure would be circular (1.0 by "

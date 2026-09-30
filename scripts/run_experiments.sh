@@ -20,7 +20,14 @@
 #   DEPTH         max search depth                        (default 3)
 #   RELATION_WIDTH / ENTITY_WIDTH                         (default 3 / 3)
 #   MODEL_NAME    served model id, must match vLLM        (default google/gemma-3-4b-it)
-#   MODEL_REVISION  model commit; required for a citable measurement
+#   MODEL_REVISION  model commit; REQUIRED in full mode (the run fails without it)
+#   RUN_MODE      full (default) | smoke. full = citable measurement: measure_run's
+#                 preflight aborts on a dirty git tree, an empty/mismatched
+#                 MODEL_REVISION, queued vLLM requests or a busy GPU. smoke = the
+#                 same checks are recorded but the run proceeds, marked
+#                 citable=false in run_provenance.json.
+#   PREFLIGHT_MAX_GPU_UTIL  idle median GPU utilization % above which the GPU is
+#                 treated as busy (default 30; rationale in measurement/run_preflight.py)
 #   OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_TIMEOUT
 #   FREEBASE_SPARQL_ENDPOINT
 #   LLM_HEALTH_TIMEOUT  seconds for the test generation            (default 60)
@@ -55,6 +62,7 @@ TEMPERATURE_REASONING="${TEMPERATURE_REASONING:-0.01}"
 
 export MODEL_NAME="${MODEL_NAME:-google/gemma-3-4b-it}"
 export MODEL_REVISION="${MODEL_REVISION:-}"
+RUN_MODE="${RUN_MODE:-full}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://localhost:8000/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
 export OPENAI_TIMEOUT="${OPENAI_TIMEOUT:-300}"
@@ -122,8 +130,15 @@ preflight() {
 			"graph <$FREEBASE_GRAPH> holds $triples triples, expected $EXPECTED_TRIPLES"
 	fi
 
-	[ -n "$MODEL_REVISION" ] || echo \
-		"WARNING: MODEL_REVISION is empty — these runs are validation runs, not citable measurements." >&2
+	case "$RUN_MODE" in
+		full)
+			[ -n "$MODEL_REVISION" ] || fail \
+				"MODEL_REVISION is empty. A full (citable) run must identify the served weights; set MODEL_REVISION, or RUN_MODE=smoke for a non-citable development run." ;;
+		smoke)
+			[ -n "$MODEL_REVISION" ] || echo \
+				"WARNING: MODEL_REVISION is empty — smoke run, NOT citable." >&2 ;;
+		*) fail "RUN_MODE must be 'full' or 'smoke', got '$RUN_MODE'" ;;
+	esac
 	echo "preflight OK: model=$MODEL_NAME generation=ok kg=reachable triples=$triples"
 }
 
@@ -158,7 +173,7 @@ for METHOD in $METHODS; do
 	pred_args=()
 	[ -n "$PRED_DIR" ] && pred_args=(--output_dir "$PRED_DIR/$METHOD")
 
-	python measurement/measure_run.py --tag "$TAG" -- \
+	python measurement/measure_run.py --tag "$TAG" --mode "$RUN_MODE" -- \
 		--method "$METHOD" --dataset "$DATASET" --kb freebase \
 		--run_size "$RUN_SIZE" "${pred_args[@]}" \
 		--relation_width "$RELATION_WIDTH" --entity_width "$ENTITY_WIDTH" \

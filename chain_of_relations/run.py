@@ -165,22 +165,86 @@ def count_done(output_jsonl_file: str) -> int:
 		return sum(1 for _ in f)
 
 
-def save_param_json_if_missing(
-	output_dir: str,
-	args: argparse.Namespace,
-	resolved_values: Dict[str, Any],
-) -> Tuple[str, bool]:
-	os.makedirs(output_dir, exist_ok=True)
-	param_json_file = os.path.join(output_dir, "param.json")
-	if os.path.exists(param_json_file):
-		return param_json_file, False
+#: param.json layout version. Files without it predate provenance recording.
+PARAM_SCHEMA = 2
+#: Arguments that select questions or presentation, not agent behaviour: a
+#: resume may legitimately change them (e.g. extend --run_size).
+NON_BEHAVIOURAL_ARGS = ("run_size", "question_id", "output_dir", "log_level", "save_detail")
 
-	payload = {
+
+class ParamConflictError(RuntimeError):
+	"""An output directory's param.json disagrees with the requested run."""
+
+
+def _env_bool(name: str):
+	value = os.getenv(name, "").strip().lower()
+	return {"true": True, "false": False}.get(value)
+
+
+def code_provenance() -> Dict[str, Any]:
+	"""git commit + dirty state: handed down by measure_run, else detected."""
+	commit = os.getenv("ENERGY_GIT_COMMIT", "") or energy_events.detect_git_commit()
+	dirty = _env_bool("ENERGY_GIT_DIRTY") if os.getenv("ENERGY_GIT_DIRTY") else energy_events.detect_git_dirty()
+	return {"git_commit": commit or None, "git_dirty": dirty}
+
+
+def build_param_payload(args: argparse.Namespace, provenance: Dict[str, Any]) -> Dict[str, Any]:
+	return {
+		"param_schema": PARAM_SCHEMA,
 		"argparse": vars(args),
 		"environment": {
 			"MODEL_NAME": os.getenv("MODEL_NAME"),
+			"MODEL_REVISION": os.getenv("MODEL_REVISION") or None,
+			"OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL") or None,
 		},
+		"provenance": dict(provenance),
 	}
+
+
+def param_conflicts(existing: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
+	"""Why a run described by `new` must not resume into `existing`'s directory."""
+	if existing.get("param_schema") != PARAM_SCHEMA:
+		return ["param.json predates provenance recording (no param_schema): its "
+		        "model revision and code state are unknown"]
+	problems = []
+	old_args, new_args = existing.get("argparse", {}), new.get("argparse", {})
+	for key in sorted(set(old_args) | set(new_args)):
+		if key in NON_BEHAVIOURAL_ARGS:
+			continue
+		if old_args.get(key) != new_args.get(key):
+			problems.append(f"{key}: {old_args.get(key)!r} -> {new_args.get(key)!r}")
+	for key in ("MODEL_NAME", "MODEL_REVISION"):
+		old_v, new_v = existing.get("environment", {}).get(key), new.get("environment", {}).get(key)
+		if old_v != new_v:
+			problems.append(f"{key}: {old_v!r} -> {new_v!r}")
+	old_code, new_code = existing.get("provenance", {}), new.get("provenance", {})
+	if old_code.get("git_commit") != new_code.get("git_commit"):
+		problems.append(f"git_commit: {old_code.get('git_commit')!r} -> {new_code.get('git_commit')!r}")
+	if old_code.get("git_dirty") is not False or new_code.get("git_dirty") is not False:
+		problems.append("a dirty or unknown working tree cannot be resumed: the code that "
+		                "produced the existing predictions is not identifiable")
+	return problems
+
+
+def save_or_check_param_json(output_dir: str, payload: Dict[str, Any]) -> Tuple[str, bool]:
+	"""Write param.json for a fresh directory; verify it when resuming.
+
+	A compatible resume leaves the original file untouched. An incompatible
+	one raises ParamConflictError: stale parameters are never silently kept,
+	and an existing record is never silently overwritten.
+	"""
+	os.makedirs(output_dir, exist_ok=True)
+	param_json_file = os.path.join(output_dir, "param.json")
+	if os.path.exists(param_json_file):
+		with open(param_json_file, encoding="utf-8") as f:
+			existing = json.load(f)
+		problems = param_conflicts(existing, payload)
+		if problems:
+			raise ParamConflictError(
+				f"{param_json_file} is incompatible with this run:\n  - "
+				+ "\n  - ".join(problems)
+				+ "\nUse a fresh --output_dir (or move the old one aside).")
+		return param_json_file, False
 
 	with open(param_json_file, "w", encoding="utf-8") as f:
 		json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -378,17 +442,21 @@ def main() -> None:
 	# Run-scoped measurement provenance, configured once here rather than
 	# threaded through every event. Missing optional provenance is left empty
 	# (serialized as null) and must never break the run.
+	provenance = code_provenance()
 	energy_events.configure(
 		run_id=os.getenv("ENERGY_RUN_ID", "") or uuid.uuid4().hex,
 		dataset=args.dataset,
 		paradigm=args.method,
 		model_name=model_name,
 		model_revision=os.getenv("MODEL_REVISION", ""),
-		git_commit=os.getenv("ENERGY_GIT_COMMIT", "") or energy_events.detect_git_commit(),
+		git_commit=provenance["git_commit"] or "",
 		hardware_id=os.getenv("ENERGY_HARDWARE_ID", "") or energy_events.detect_hardware_id(),
 	)
 	if energy_events.enabled():
 		logging.info("energy events enabled | run_context=%s", energy_events.run_context())
+	logging.info("code provenance | git_commit=%s git_dirty=%s run_mode=%s citable=%s",
+	             provenance["git_commit"], provenance["git_dirty"],
+	             os.getenv("ENERGY_RUN_MODE") or "unmeasured", os.getenv("ENERGY_RUN_CITABLE") or "n/a")
 
 	datas, indicator, dataset_path = prepare_dataset(args.dataset)
 	logging.info(f"Loaded dataset: {dataset_path}, size={len(datas)}")
@@ -466,19 +534,23 @@ def main() -> None:
 	output_dir = (str(Path(args.output_dir).expanduser()) if args.output_dir
 	              else str(PROJECT_ROOT / "results" / args.method / args.dataset / model_dirname))
 	output_jsonl_file = str(Path(output_dir) / "predict.jsonl")
-	param_json_file, param_created = save_param_json_if_missing(
-		output_dir=output_dir,
-		args=args,
-		resolved_values={
-			"model_name": model_name,
-			"model_dirname": model_dirname,
-			"output_jsonl_file": output_jsonl_file,
-		},
-	)
+	param_payload = build_param_payload(args, dict(
+		provenance,
+		hardware_id=energy_events.run_context().get("hardware_id") or None,
+		run_id=energy_events.run_context().get("run_id") or None,
+		run_mode=os.getenv("ENERGY_RUN_MODE") or None,
+		citable=_env_bool("ENERGY_RUN_CITABLE"),
+		run_provenance_file=os.getenv("ENERGY_RUN_PROVENANCE_FILE") or None,
+	))
+	try:
+		param_json_file, param_created = save_or_check_param_json(output_dir, param_payload)
+	except ParamConflictError as e:
+		logging.error(str(e))
+		raise SystemExit(2)
 	if param_created:
 		logging.info(f"created param file: {param_json_file}")
 	else:
-		logging.info(f"param file exists, skip create: {param_json_file}")
+		logging.info(f"param file exists and matches this run (compatible resume): {param_json_file}")
 
 	done_ids = set()
 	if not args.question_id and os.path.exists(output_jsonl_file):

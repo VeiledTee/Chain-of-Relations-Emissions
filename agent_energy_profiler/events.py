@@ -214,6 +214,28 @@ def detect_git_commit(repo_path=None) -> str:
 	return ""
 
 
+def detect_git_dirty(repo_path=None):
+	"""Whether the working tree differs from its commit, or None if unknown.
+
+	True when `git status --porcelain` lists anything: modified, staged,
+	deleted or untracked-but-not-ignored files. A commit hash alone does not
+	identify the code that ran once the tree is dirty, so this is recorded
+	beside git_commit. None (git missing, not a repository, timeout) means the
+	state is unknown -- never reported as clean.
+	"""
+	try:
+		out = subprocess.run(
+			["git", "status", "--porcelain", "--untracked-files=normal"],
+			cwd=repo_path or os.getcwd(),
+			capture_output=True, text=True, timeout=10,
+		)
+		if out.returncode == 0:
+			return bool(out.stdout.strip())
+	except Exception:
+		pass
+	return None
+
+
 def detect_hardware_id() -> str:
 	"""Stable-ish host descriptor: hostname plus GPU model(s)."""
 	try:
