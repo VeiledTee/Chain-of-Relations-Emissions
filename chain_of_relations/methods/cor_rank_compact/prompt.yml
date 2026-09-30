@@ -1,0 +1,59 @@
+# cor-rank-compact (C2 preliminary intervention): CoR's relation_pruning prompt,
+# copied byte-for-byte from methods/cor/prompt.yml except the rationale text:
+# instruction 6, the "rational" format hint, and the two few-shot example
+# rationales (shortened to <=10 words). Example questions, relation lists and
+# selections, field names, top-3 and direction text are unchanged.
+# Every other CoR stage is loaded from the baseline file, never from here.
+relation_pruning:
+  system_prompt: |-
+    # Task Definition
+    You are a KG relation-pruning expert.
+    Given a question and forward/backward relation candidates under the current reasoning path, select the most useful top-3 relations for answer-oriented expansion.
+
+    # Instruction
+    1. Select no more than top-3 relations from the provided candidates.
+    2. Use the SPARQL snippets as the source of truth for direction and role semantics.
+       - Example (same relation, different meaning by direction):
+         TopicEntity(Tom) father.of ?x => ?x is Tom's child.
+         ?x father.of TopicEntity(Tom) => ?x is Tom's father.
+    3. Prioritize relations that address unresolved question constraints.
+    4. Down-rank redundant or near-duplicate relations.
+    5. Unless explicitly required, down-rank schema/meta relations (e.g., `type.object.type`).
+    6. Keep rationale to no more than 10 words.
+
+    # Output Format
+    Return exactly one JSON object. No markdown, no extra text.
+    {
+      "rational": "reasoning in no more than 10 words",
+      "relation_by_relevance": ["relation_1", "relation_2"]
+    }
+    - `relation_by_relevance` must be ordered from most relevant to less relevant.
+    - Include no more than 3 relations.
+
+    # For Examples
+    Q: where did saki live?
+    # TopicEntity(saki) ?relation ?x
+    base.schemastaging.context_name.nickname; base.schemastaging.context_name.official_name; people.person.place_of_birth; film.film_story_contributor.film_story_credits; film.writer.film; people.deceased_person.place_of_death; people.person.nationality; book.author.works_written; book.book_subject.works;
+    # ?x ?relation TopicEntity(saki)
+    book.book_edition.author_editor; book.written_work.author; book.written_work.subjects; dataworld.gardening_hint.last_referenced_by;
+    Answer:
+    {
+      "rational": "Location question: prefer relations linking Saki to places.",
+      "relation_by_relevance": ["people.person.place_of_birth", "people.deceased_person.place_of_death", "people.person.nationality"]
+    }
+
+    Q: what character did john noble play in lord of the rings?
+    # TopicEntity(john_noble) film.actor.film e1 . e1 ?relation ?x
+    film.performance.actor; film.performance.character; film.performance.character_note; film.performance.film; film.performance.special_performance_type
+    # TopicEntity(john_noble) film.actor.film e1 . ?x ?relation e1
+    film.film.starring; film.film_character.portrayed_in_films; film.special_film_performance_type.film_performance_type
+    Answer:
+    {
+      "rational": "Character answer: performance-character edge, then film constraint relations.",
+      "relation_by_relevance": ["film.performance.character", "film.performance.film", "film.film.starring"]
+    }
+
+  user_prompt: |-
+    Q: {{question}}
+    {{relations}}
+    Answer: 

@@ -273,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
 		"--method",
 		type=str,
 		default="tog",
-		choices=["tog", "pog", "pog-rank-cache", "cor", "cot_prompt", "io_prompt"],
+		choices=["tog", "pog", "pog-rank-cache", "cor", "cor-rank-compact", "cot_prompt", "io_prompt"],
 		help="reasoning method",
 	)
 	parser.add_argument("--dataset", type=str, default="webqsp", choices=["cwq", "webqsp", "qald10_en"])
@@ -342,6 +342,13 @@ def load_agent_class(method: str):
 		from chain_of_relations.methods.cor.agent import CoRAgent
 
 		return CoRAgent
+
+	if method == "cor-rank-compact":
+		# C2 preliminary intervention: baseline CoR with a <=10-word
+		# relation_rank rationale (methods/cor_rank_compact/agent.py).
+		from chain_of_relations.methods.cor_rank_compact.agent import CoRRankCompactAgent
+
+		return CoRRankCompactAgent
 
 	if method == "cot_prompt":
 		from chain_of_relations.methods.cot_prompt.agent import CoTPromptAgent
@@ -427,7 +434,7 @@ def main() -> None:
 				max_token=args.max_token,
 				backend=kg_backend,
 			)
-		elif args.method == "cor":
+		elif args.method in ("cor", "cor-rank-compact"):
 			agent = AgentClass(
 				model_name=model_name,
 				relation_width=relation_width,
